@@ -1,24 +1,65 @@
-// src/lib/templateMatcher.js
-// PDF -> text + TF-IDF cosine similarity for Privacy / Terms / FAQ (EN)
-// Next step will wire this into /api/prueba and add section checks + spellcheck.
-//
-// ⬇️ Requires: `npm i pdf-parse`
-// Works in Next.js Route Handlers (Node runtime)
-
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-async function readPdfToText(absPath) {
-  const pdfParse = (await import('pdf-parse')).default;
+// Asegura que cualquier entrada sea una ruta de FS válida (no URL http)
+function toFsPath(p) {
+  if (typeof p === 'string') return p;
+  if (p && typeof p === 'object' && 'protocol' in p) {
+    // WHATWG URL
+    if (p.protocol === 'file:') return fileURLToPath(p);
+    throw new Error(`Expected a filesystem path, got non-file URL: ${p.href || String(p)}`);
+  }
+  return String(p);
+}
+
+// Import robusto de pdf-parse (algunos setups requieren el entry real)
+async function importPdfParse() {
+  try {
+    const mod = await import('pdf-parse');
+    return mod && (mod.default || mod);
+  } catch {
+    const mod = await import('pdf-parse/lib/pdf-parse.js');
+    return mod && (mod.default || mod);
+  }
+}
+
+
+async function readPdfToText(absPathInput) {
+  const pdfParse = await importPdfParse();
+
+  // normaliza a ruta de FS
+  const absPath = toFsPath(absPathInput);
+
+  // 1) existencia
+  if (!fsSync.existsSync(absPath)) {
+    throw new Error(`Template PDF not found at path: ${absPath}`);
+  }
+
+  // 2) tamaño > 0
+  const stat = await fs.stat(absPath);
+  if (!stat || stat.size === 0) {
+    throw new Error(`Template PDF is empty (0 bytes): ${absPath}`);
+  }
+
+  // 3) leer buffer
   const data = await fs.readFile(absPath);
+  if (!Buffer.isBuffer(data) || data.length === 0) {
+    throw new Error(`Template PDF could not be read as a Buffer: ${absPath}`);
+  }
+
+  // 4) parsear
   const parsed = await pdfParse(data);
-  // normalize whitespace + lowercase for stable scoring
-  return (parsed.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const text = (parsed?.text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!text) {
+    throw new Error(`Template PDF returned empty text after parsing: ${absPath}`);
+  }
+  return text;
 }
 
 function tokenize(text) {
-  // basic tokenization; keep letters/numbers, drop punctuation
-  return text.split(/[^a-z0-9]+/g).filter(Boolean);
+  return (text || '').split(/[^a-z0-9]+/gi).filter(Boolean);
 }
 
 function termFreq(tokens) {
@@ -28,7 +69,6 @@ function termFreq(tokens) {
 }
 
 function buildVocab(docFreqs) {
-  // docFreqs: array<Map> of termFreqs
   const vocab = new Map();
   for (const df of docFreqs) {
     for (const k of df.keys()) vocab.set(k, (vocab.get(k) || 0) + 1);
@@ -37,7 +77,6 @@ function buildVocab(docFreqs) {
 }
 
 function tfidfVector(tfMap, vocab, docCount) {
-  // log-tf * idf; idf = ln( (N + 1) / (df + 1) ) + 1
   const vec = new Map();
   for (const [term, f] of tfMap.entries()) {
     const df = vocab.get(term) || 0;
@@ -63,57 +102,75 @@ function cosineSim(vecA, vecB) {
 }
 
 /**
- * Builds a template pack by loading PDFs (absolute or relative to project root).
+ * Carga los 3 templates desde PDFs (las rutas pueden ser relativas a la raíz del proyecto).
+ * Loguea rutas y tamaños para debug.
  * @param {{privacy:string, terms:string, faq:string}} paths
- * @returns {Promise<{privacy:string, terms:string, faq:string}>}
  */
 export async function loadTemplatePack(paths) {
   const root = process.cwd();
   const resolveMaybeAbs = (p) => (path.isAbsolute(p) ? p : path.join(root, p));
-  const [privacy, terms, faq] = await Promise.all([
-    readPdfToText(resolveMaybeAbs(paths.privacy)),
-    readPdfToText(resolveMaybeAbs(paths.terms)),
-    readPdfToText(resolveMaybeAbs(paths.faq)),
-  ]);
-  return { privacy, terms, faq };
+  const resolved = {
+    privacy: resolveMaybeAbs(paths.privacy),
+    terms:   resolveMaybeAbs(paths.terms),
+    faq:     resolveMaybeAbs(paths.faq),
+  };
+
+  // debug: rutas y tamaños
+  const sizes = {};
+  for (const [k, p] of Object.entries(resolved)) {
+    const fsPath = toFsPath(p);
+    try {
+      const s = fsSync.existsSync(fsPath) ? fsSync.statSync(fsPath)?.size : -1;
+      sizes[k] = s;
+    } catch {
+      sizes[k] = -1;
+    }
+  }
+  console.log('[templates] resolved paths:', resolved);
+  console.log('[templates] file sizes (bytes):', sizes);
+
+  try {
+    const [privacy, terms, faq] = await Promise.all([
+      readPdfToText(resolved.privacy),
+      readPdfToText(resolved.terms),
+      readPdfToText(resolved.faq),
+    ]);
+    return { privacy, terms, faq };
+  } catch (err) {
+    const hint =
+      `Resolved template paths:\n` +
+      ` - privacy: ${resolved.privacy}\n` +
+      ` - terms:   ${resolved.terms}\n` +
+      ` - faq:     ${resolved.faq}\n` +
+      `File sizes: ${JSON.stringify(sizes)}`;
+    const msg = err && err.message ? `${err.message}\n${hint}` : `Failed to load templates.\n${hint}`;
+    throw new Error(msg);
+  }
 }
 
-/**
- * Computes cosine similarity (%) between pageText and a given templateText using TF-IDF.
- * @param {string} pageText - normalized plain text from website (lowercase recommended)
- * @param {string} templateText - text extracted from PDF template
- * @returns {number} similarity in [0..100]
- */
-export function similarityToTemplate(pageText, templateText) {
-  const t1 = tokenize(pageText.toLowerCase());
-  const t2 = tokenize(templateText.toLowerCase());
 
-  // Build document frequency (2 docs)
+export function similarityToTemplate(pageText, templateText) {
+  const t1 = tokenize(pageText);
+  const t2 = tokenize(templateText);
+  if (!t1.length || !t2.length) return 0;
+
   const tf1 = termFreq(t1);
   const tf2 = termFreq(t2);
   const vocab = buildVocab([tf1, tf2]);
 
-  // TF-IDF vectors
   const v1 = tfidfVector(tf1, vocab, 2);
   const v2 = tfidfVector(tf2, vocab, 2);
 
   return Math.round(cosineSim(v1, v2) * 100);
 }
 
-/**
- * High-level scoring against the 3 templates.
- * @param {{privacy:string, terms:string, faq:string}} templatePack
- * @param {{privacy?:string, terms?:string, faq?:string}} siteTexts - extracted texts per page
- * @returns {Record<"privacy"|"terms"|"faq",{similarity:number}>}
- */
+
 export function scoreAgainstPack(templatePack, siteTexts) {
   const out = {};
   for (const type of /** @type {const} */ (['privacy', 'terms', 'faq'])) {
-    const siteText = (siteTexts[type] || '').toLowerCase();
-    const tplText = (templatePack[type] || '').toLowerCase();
-    out[type] = {
-      similarity: siteText && tplText ? similarityToTemplate(siteText, tplText) : 0
-    };
+    const siteText = siteTexts[type] || '';
+    const tplText  = templatePack[type] || '';
+    out[type] = { similarity: similarityToTemplate(siteText, tplText) };
   }
   return out;
 }

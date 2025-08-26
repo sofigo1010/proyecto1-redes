@@ -1,126 +1,120 @@
-// app/api/prueba/route.js
-// Step 5: Wire PDFs (EN) via TF-IDF similarity using src/lib/templateMatcher.js
-// Requires: npm i pdf-parse
+export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
-import { loadTemplatePack, scoreAgainstPack } from '@/src/lib/templateMatcher';
+import path from 'node:path';
+import { loadTemplatePack, scoreAgainstPack } from '../../../lib/templateMatcher';
+import { extractHeadings, htmlToPlain } from '../../../lib/sections';
 
-// ---- Config: put your 3 PDFs in /templates (relative to project root)
+const ROOT = process.cwd();
 const TEMPLATE_PATHS = {
-  privacy: 'templates/Privacy Policy for brand partners 2025.docx.pdf',
-  terms: 'templates/Terms of Service for brand partners 2025.docx.pdf',
-  faq: 'templates/Customer Service FAQ - 2025.pdf',
+  privacy: path.join(ROOT, 'src/app/api/templates/PP.pdf'),
+  terms:   path.join(ROOT, 'src/app/api/templates/TOS.pdf'),
+  faq:     path.join(ROOT, 'src/app/api/templates/CS.pdf'),
 };
+
+const ENABLE_SPELLCHECK = true;
 
 const CANDIDATE_TAILS = {
   privacy: ['privacy', 'privacy-policy', 'policy', 'policies'],
-  terms: ['terms', 'terms-of-service', 'terms-and-conditions', 'legal'],
-  faq: ['faq', 'faqs', 'help', 'support', 'knowledge', 'questions'],
+  terms:   ['terms', 'terms-of-service', 'terms-and-conditions', 'legal'],
+  faq:     ['faq', 'faqs', 'help', 'support'],
 };
 
-const TYPE_ORDER = ['privacy', 'terms', 'faq'];
-const TIMEOUT_MS = 12_000;
-const PASS_THRESHOLD = 80; // pass if similarity >= 80
+const TYPES = /** @type {const} */ (['privacy', 'terms', 'faq']);
+const PASS_THRESHOLD = 80;
+const FAQ_SOFT_PASS  = 60;
+const TIMEOUT_MS     = 12000;
+
+const SPELL_WHITELIST = [
+  'bevstack','mezcal','anejo','añejo','reposado','blanco','joven',
+  'añada','tequila','raicilla','bacanora','sotol','sku','skus',
+  'ecommerce','shopify','fulfillment','drizly','instacart'
+];
+
+const REQUIRED_SECTIONS = {
+  privacy: ['personal information','cookies','tracking','data security','your rights','contact'],
+  terms:   ['limitation of liability','governing law','jurisdiction','returns','refunds','shipping'],
+  faq:     ['shipping','delivery','tracking','returns','refund','exchange']
+};
 
 function normalizeOrigin(userUrl) {
   const u = new URL(userUrl);
   return `${u.protocol}//${u.hostname}`;
 }
 
-async function fetchWithTimeout(url, opts = {}) {
+async function fetchWithTimeout(url, timeout = TIMEOUT_MS) {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), opts.timeout ?? TIMEOUT_MS);
+  const t = setTimeout(() => controller.abort(), timeout);
   try {
-    const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    const res = await fetch(url, {
+      signal: controller.signal,
+      redirect: 'follow',
+      headers: { 'User-Agent': 'BevstackAuditor/1.0 (+https://bevstack.io)' }
+    });
     return res;
   } finally {
-    clearTimeout(id);
+    clearTimeout(t);
   }
 }
 
-function htmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<\/?[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function findCandidateLink(html, origin, tails) {
-  const anchorRegex = /<a\s+[^>]*href\s*=\s*"(.*?)"[^>]*>(.*?)<\/a>/gi;
-  let match;
+function findCandidateLink(homeHtml, origin, tails) {
   const links = [];
-  while ((match = anchorRegex.exec(html)) !== null) {
-    const href = match[1];
-    if (!href) continue;
-    let absolute;
+  const re = /<a\s+[^>]*href\s*=\s*"(.*?)"[^>]*>/gi;
+  let m;
+  while ((m = re.exec(homeHtml)) !== null) {
+    const href = m[1]; if (!href) continue;
     try {
-      absolute = new URL(href, origin).toString();
-    } catch {
-      continue;
-    }
-    links.push(absolute);
+      const abs = new URL(href, origin).toString();
+      links.push(abs.toLowerCase());
+    } catch {}
   }
   for (const link of links) {
-    const lower = link.toLowerCase();
-    if (tails.some((t) => lower.includes(`/${t}`) || lower.endsWith(`/${t}`))) {
-      return link;
-    }
+    if (tails.some((t) => link.includes(`/${t}`) || link.endsWith(`/${t}`))) return link;
   }
   return null;
 }
 
-async function getPageTextForType(origin, homepageHtml, type) {
+async function getPage(origin, homeHtml, type) {
   const tails = CANDIDATE_TAILS[type];
-  let url = findCandidateLink(homepageHtml, origin, tails);
+  let url = findCandidateLink(homeHtml, origin, tails);
 
   if (!url) {
     for (const t of tails) {
       const guess = `${origin}/${t}`;
       try {
-        const r = await fetchWithTimeout(guess, { timeout: 6000 });
-        if (r.ok) {
-          url = guess;
-          break;
-        }
-      } catch {
-        // ignore
-      }
+        const r = await fetchWithTimeout(guess, 6000);
+        if (r.ok) { url = guess; break; }
+      } catch {}
     }
   }
 
-  if (!url) {
-    return { type, foundAt: null, text: '' };
-  }
+  if (!url) return { type, foundAt: null, text: '', headings: { h1: [], h2: [], h3: [] } };
 
   try {
-    const res = await fetchWithTimeout(url);
-    if (!res.ok) {
-      return { type, foundAt: url, text: '' };
-    }
-    const html = await res.text();
-    const text = htmlToText(html);
-    return { type, foundAt: url, text };
+    const r = await fetchWithTimeout(url);
+    if (!r.ok) return { type, foundAt: url, text: '', headings: { h1: [], h2: [], h3: [] } };
+    const html = await r.text();
+    return { type, foundAt: url, text: htmlToPlain(html), headings: extractHeadings(html) };
   } catch {
-    return { type, foundAt: url, text: '' };
+    return { type, foundAt: url, text: '', headings: { h1: [], h2: [], h3: [] } };
   }
 }
 
 export async function POST(req) {
   try {
     const { url } = await req.json();
-    if (!url) {
-      return NextResponse.json({ error: 'URL required' }, { status: 400 });
-    }
+    if (!url) return NextResponse.json({ error: 'URL required' }, { status: 400 });
 
     const origin = normalizeOrigin(url);
 
-    // 1) Load templates from PDFs (once per request; you can memoize if needed)
-    const templates = await loadTemplatePack(TEMPLATE_PATHS); // { privacy, terms, faq } as text
+    // 1) Templates (PDF -> texto)
+    let templates;
+    try {
+      templates = await loadTemplatePack(TEMPLATE_PATHS);
+    } catch (tplErr) {
+      return NextResponse.json({ error: String(tplErr?.message || tplErr) }, { status: 500 });
+    }
 
-    // 2) Fetch homepage
+    // 2) Homepage
     const homeRes = await fetchWithTimeout(origin);
     if (!homeRes.ok) {
       return NextResponse.json(
@@ -128,67 +122,98 @@ export async function POST(req) {
         { status: 502 }
       );
     }
-    const homepageHtml = await homeRes.text();
+    const homeHtml = (await homeRes.text()).toLowerCase();
 
-    // 3) Collect candidate page texts
-    const pageResults = [];
-    for (const t of TYPE_ORDER) {
+    // 3) Candidatas
+    const collected = [];
+    for (const type of TYPES) {
       // eslint-disable-next-line no-await-in-loop
-      const pr = await getPageTextForType(origin, homepageHtml, t);
-      pageResults.push(pr);
+      const pr = await getPage(origin, homeHtml, type);
+      collected.push(pr);
     }
 
-    // 4) Score each type against its PDF template
+    // 4) TF-IDF vs templates
     const siteTexts = {
-      privacy: pageResults.find((p) => p.type === 'privacy')?.text || '',
-      terms: pageResults.find((p) => p.type === 'terms')?.text || '',
-      faq: pageResults.find((p) => p.type === 'faq')?.text || '',
+      privacy: collected.find((p) => p.type === 'privacy')?.text || '',
+      terms:   collected.find((p) => p.type === 'terms')?.text   || '',
+      faq:     collected.find((p) => p.type === 'faq')?.text     || '',
     };
-    const scores = scoreAgainstPack(templates, siteTexts); // { privacy:{similarity}, ... }
+    const scores = scoreAgainstPack(templates, siteTexts);
 
-    // 5) Build response
-    const pages = pageResults.map((p) => {
-      const sim = scores[p.type]?.similarity ?? 0;
-      const pass = p.foundAt && sim >= PASS_THRESHOLD;
+    // 5) Páginas + spellcheck tolerante
+    const pages = [];
+    for (const p of collected) {
+      const similarity = scores[p.type]?.similarity ?? 0;
+
+      // secciones mínimas
+      const required = REQUIRED_SECTIONS[p.type] || [];
+      const sectionsFound = [];
       const sectionsMissing = [];
-      if (!p.foundAt) sectionsMissing.push('Not found');
-      if (p.foundAt && !pass) sectionsMissing.push('Below 80% similarity to template');
+      for (const s of required) {
+        if (p.text.includes(s.toLowerCase())) sectionsFound.push(s);
+        else sectionsMissing.push(s);
+      }
+
+      const passBySimilarity = p.type === 'faq'
+        ? similarity >= FAQ_SOFT_PASS
+        : similarity >= PASS_THRESHOLD;
+      const passBySections = sectionsMissing.length === 0;
+      const pass = !!p.foundAt && passBySimilarity && passBySections;
+
+      if (p.foundAt && !passBySimilarity) {
+        sectionsMissing.push(
+          p.type === 'faq'
+            ? `Below ${FAQ_SOFT_PASS}% similarity to template`
+            : `Below ${PASS_THRESHOLD}% similarity to template`
+        );
+      }
+
+      // spellcheck (si falla, no rompe)
+      let typos = [];
+      let rate  = 0;
+      if (ENABLE_SPELLCHECK && p.text) {
+        try {
+          const { spellcheckText, typoRate } = await import('../../../lib/spellcheck.js');
+          const totalWords = (p.text.match(/\b[a-zA-Z]+\b/g) || []).length;
+          const errs = await spellcheckText(p.text, { whitelist: SPELL_WHITELIST, maxErrors: 20 });
+          typos = errs.slice(0, 5);
+          rate = typoRate(errs.length, totalWords);
+        } catch (e) {
+          // deja trazas para debug pero no rompe la respuesta
+          console.warn('[spellcheck] disabled due to error:', e?.message || e);
+        }
+      }
+
       const out = {
         type: p.type,
         foundAt: p.foundAt,
-        similarity: sim,
+        similarity,
+        sectionsFound,
         sectionsMissing,
-        typos: [], // spellcheck (en-US) will be added in the next step
+        typos,
+        typoRate: rate,
         pass,
+        headings: p.headings || { h1: [], h2: [], h3: [] }
       };
-      if (p.type === 'faq') {
-        const qCount = (p.text.match(/\?/g) || []).length;
-        out.qaCount = qCount;
-      }
-      return out;
-    });
+      if (p.type === 'faq') out.qaCount = (p.text.match(/\?/g) || []).length;
+      pages.push(out);
+    }
 
+    // 6) score global
     const present = pages.filter((p) => p.foundAt);
-    const avg = present.length
+    const overallScore = present.length
       ? Math.round(present.reduce((s, p) => s + (p.similarity || 0), 0) / present.length)
       : 0;
-
-    // overall pass = all present and each >= 80, FAQ can be soft-fail if >=60 (optional tweak)
-    const overallPass = pages.every((p) =>
-      p.type === 'faq' ? (p.foundAt && p.similarity >= 60) : p.pass
-    );
+    const overallPass = pages.every((p) => p.pass);
 
     return NextResponse.json({
       language: 'en',
       domain: new URL(origin).hostname,
       overallPass,
-      overallScore: avg,
+      overallScore,
       pages,
     });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err?.message || 'Unexpected error' },
-      { status: 500 }
-    );
+  } catch (e) {
+    return NextResponse.json({ error: e?.message || 'Unexpected error' }, { status: 500 });
   }
 }
