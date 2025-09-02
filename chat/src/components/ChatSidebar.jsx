@@ -28,7 +28,7 @@ export default function ChatSidebar({
 
   const handleMore = (e, chat) => {
     e.stopPropagation()
-    // Menú mínimo sin cambiar UI: prompt/confirm nativos
+    // Menú prompt/confirm nativos
     const action = window.prompt('Type an action: "rename" or "delete"', "rename")
     if (!action) return
 

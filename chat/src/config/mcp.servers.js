@@ -1,7 +1,19 @@
-// chat/src/config/mcp.servers.js
 // Declarative registry of MCP stdio servers (multi-MCP ready).
-// For now we only register "auditor" (your bevstack mcp-auditor),
-// but you can add more blocks later with minimal changes.
+// Este módulo centraliza cómo se resuelven los comandos/entornos para
+// cada servidor MCP que se quiera correr por stdio.
+// La app de chat consulta esta función para saber cómo spawnnear
+// (cmdLine, cwd, env) de cada servidor por nombre.
+//
+// Convenciones de variables de entorno por servidor (ej. "auditor"):
+//   - MCP_auditor_CMD       → línea de comando completa (tiene prioridad máxima)
+//   - MCP_auditor_ARGS      → argumentos extra que se anexan al comando
+//   - MCP_auditor_CWD       → directorio de trabajo del proceso hijo
+//   - MCP_auditor_MANIFEST  → ruta explícita a mcp.manifest.json
+//   - MCP_LOG_LEVEL         → nivel de logs para el servidor (se inyecta como LOG_LEVEL)
+//
+// Además, si existe un repo hermano ../mcp-auditor, se detecta y se
+// construye un default razonable: `node ../mcp-auditor/bin/mcp-auditor.js`
+// con cwd en ese repo y MCP_MANIFEST_PATH apuntando a su manifest.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -9,21 +21,26 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Resuelve rutas candidatas al repo hermano "mcp-auditor".
+ * Se usa para ofrecer defaults sin necesidad de configurar envs.
+ */
 function siblingAuditorPaths() {
-  // this file: chat/src/config → chat/
+  // Este archivo vive en chat/src/config → subir a chat/
   const chatDir = path.resolve(__dirname, '..', '..');
-  const repoDir = path.resolve(chatDir, '../mcp-auditor'); // sibling repo
+  // Repo hermano a la par de chat/
+  const repoDir = path.resolve(chatDir, '../mcp-auditor');
   const binJs = path.join(repoDir, 'bin', 'mcp-auditor.js');
   const manifest = path.join(repoDir, 'mcp.manifest.json');
   return { repoDir, binJs, manifest };
 }
 
 /**
- * Compute a sensible default command line for the "auditor" server.
- * Priority:
- *  1) env MCP_auditor_CMD (full command line, e.g. "node ../mcp-auditor/bin/mcp-auditor.js")
- *  2) sibling repo: ../mcp-auditor/bin/mcp-auditor.js (run with the current Node)
- *  3) global binary on PATH: "mcp-auditor"
+ * Construye la línea de comando por defecto para el servidor "auditor".
+ * Prioridad:
+ *  1) MCP_auditor_CMD (línea completa provista por env)
+ *  2) Repo hermano: usar el Node actual + bin local (si existe)
+ *  3) Binario global en PATH: "mcp-auditor"
  */
 function defaultAuditorCmdLine() {
   const envLine = (process.env.MCP_auditor_CMD || '').trim();
@@ -31,20 +48,24 @@ function defaultAuditorCmdLine() {
 
   const { binJs } = siblingAuditorPaths();
   if (fs.existsSync(binJs)) {
+    // Usa el mismo Node del proceso actual para evitar discrepancias de versiones
     return `${process.execPath} ${binJs}`;
   }
+  // Fallback: bin global
   return 'mcp-auditor';
 }
 
 /**
- * Optional default cwd and env derived from sibling repo if present.
+ * Determina cwd/env por defecto para "auditor" si el repo hermano existe.
+ * - cwd: repo raíz de mcp-auditor (para que resuelva assets relativos)
+ * - MCP_MANIFEST_PATH: solo si no se definió ya por env
  */
 function defaultAuditorCwdAndEnv() {
   const out = { cwd: undefined, env: {} };
   const { repoDir, manifest } = siblingAuditorPaths();
 
   if (fs.existsSync(repoDir)) {
-    out.cwd = repoDir; // run from the auditor repo root by default
+    out.cwd = repoDir; // correr desde la raíz del repo hermano
   }
   if (!process.env.MCP_auditor_MANIFEST && fs.existsSync(manifest)) {
     out.env.MCP_MANIFEST_PATH = manifest;
@@ -53,34 +74,37 @@ function defaultAuditorCwdAndEnv() {
 }
 
 /**
- * Returns a plain config map: serverName -> { cmdLine, cwd?, env? }
- * - cmdLine: full command line string (first token is the executable, rest are args)
- * - cwd: optional working directory (string)
- * - env: optional env object merged on top of process.env for that child
+ * Devuelve el mapa de configuración: nombre → { cmdLine, cwd?, env? }.
+ * - cmdLine: string con el ejecutable + args (la app hará el split).
+ * - cwd: string opcional; si no se define, se hereda el cwd del proceso padre.
+ * - env: objeto parcial que se fusiona sobre process.env para ese hijo.
  *
- * Add more servers by adding more keys to this map.
+ * Para añadir más MCPs en el futuro, agregar otro bloque al objeto retornado.
  */
 export default function getMcpServersConfig() {
-  // Build auditor command line with optional extra args
+  // Construye el comando base y anexa argumentos opcionales
   const baseCmd = defaultAuditorCmdLine();
   const extraArgs = (process.env.MCP_auditor_ARGS || '').trim();
   const cmdLine = extraArgs ? `${baseCmd} ${extraArgs}` : baseCmd;
 
+  // Defaults derivados del repo hermano si está presente
   const defaults = defaultAuditorCwdAndEnv();
 
   return {
+    // ---- Servidor Bevstack Auditor (actual) ----
     auditor: {
       cmdLine,
-      // env overrides precedence: explicit env -> defaults from sibling -> none
+      // Precedencia de cwd: env explícito → default basado en repo hermano → sin cwd
       cwd: (process.env.MCP_auditor_CWD || '').trim() || defaults.cwd,
       env: {
+        // Defaults (manifest detectado) primero, y luego overrides explícitos
         ...(defaults.env || {}),
         ...(process.env.MCP_LOG_LEVEL ? { LOG_LEVEL: process.env.MCP_LOG_LEVEL } : {}),
         ...(process.env.MCP_auditor_MANIFEST ? { MCP_MANIFEST_PATH: process.env.MCP_auditor_MANIFEST } : {}),
       },
     },
 
-    // Example for a future MCP (copy → edit):
+    // ---- Ejemplo de cómo registrar otro MCP en el futuro ----
     // search: {
     //   cmdLine: (process.env.MCP_search_CMD || 'node ../mcp-search/bin/server.js').trim(),
     //   cwd: (process.env.MCP_search_CWD || '').trim() || undefined,

@@ -21,12 +21,12 @@ export default function ChatInput({ onSendMessage, isSending = false }) {
     if (!value) return
 
     try {
-      // si onSendMessage es async, esperamos a que termine
+      // si onSendMessage es async, espera a que termine
       await Promise.resolve(onSendMessage?.(value))
       // limpia solo si no hubo error
       setInput("")
     } catch {
-      // si falla, conservamos el texto para que el usuario pueda reintentar/editar
+      // si falla, conserva el texto para que el usuario pueda reintentar/editar
     }
   }
 

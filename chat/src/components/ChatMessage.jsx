@@ -1,6 +1,7 @@
 "use client"
 
 import { Bot, User } from "lucide-react"
+import Markdown from "../ui/Markdown"
 
 function formatTime(ts) {
   try {
@@ -14,7 +15,7 @@ function formatTime(ts) {
 }
 
 export default function ChatMessage({ message }) {
-  const { content, isBot, timestamp } = message
+  const { content = "", isBot, timestamp } = message
   const time = formatTime(timestamp)
 
   return (
@@ -31,7 +32,13 @@ export default function ChatMessage({ message }) {
             isBot ? "bg-slate-700 border border-slate-600 text-white" : "bg-blue-600 text-white"
           }`}
         >
-          <p className="text-sm leading-relaxed">{content}</p>
+          {isBot ? (
+            <div className="text-sm leading-relaxed">
+              <Markdown>{String(content)}</Markdown>
+            </div>
+          ) : (
+            <p className="text-sm leading-relaxed">{String(content)}</p>
+          )}
         </div>
         <p className="text-xs text-slate-400 mt-1 px-2">{time}</p>
       </div>

@@ -16,12 +16,14 @@ export default function ChatLayout() {
     messages,
     newSession,
     setActiveById,
+    deleteSession,
+    renameSession,
     appendMessage,
     updateMessage,
     clearActive,
   } = useChatSessions()
 
-  // ID incremental local (solo para placeholders rápidos, pero se guardan en hook de sesiones)
+  // ID incremental local (solo para placeholders rápidos)
   const idRef = useRef(1)
   const nextId = () => ++idRef.current
 
@@ -32,6 +34,18 @@ export default function ChatLayout() {
   const handleSelectChat = useCallback((id) => {
     setActiveById(id)
   }, [setActiveById])
+
+  const handleRenameChat = useCallback((id, title) => {
+    renameSession(id, title)
+  }, [renameSession])
+
+  const handleDeleteChat = useCallback((id) => {
+    // si se borra la sesión activa y está streameando, cancelam
+    if (activeSession?.id === id && isSending) {
+      try { cancel() } catch {}
+    }
+    deleteSession(id)
+  }, [activeSession?.id, isSending, cancel, deleteSession])
 
   const handleSend = useCallback(async (text) => {
     const trimmed = String(text || "").trim()
@@ -53,23 +67,22 @@ export default function ChatLayout() {
       isBot: true,
     })
 
-    // 3) construir historial para Claude (rol user/assistant)
-    //    Excluimos el placeholder del bot
+    // 3) construir historial para Claude (rol user/assistant) excluyendo el placeholder
     const base = messages.concat([{ id: userMsgId, content: trimmed, isBot: false }])
     const toClaude = base.map(m => ({
-      role: m.isBot ? 'assistant' : 'user',
+      role: m.isBot ? "assistant" : "user",
       content: m.content,
     }))
 
     try {
       await sendMessage(trimmed, {
-        messages: toClaude, // ← historial completo
+        messages: toClaude,
         onDelta: (_chunk, full) => {
           updateMessage(botMsgId, { content: full })
         },
       })
     } catch (e) {
-      updateMessage(botMsgId, { content: `⚠️ ${e?.message || 'Error procesando tu mensaje.'}` })
+      updateMessage(botMsgId, { content: `⚠️ ${e?.message || "Error procesando tu mensaje."}` })
     }
   }, [messages, isSending, appendMessage, updateMessage, sendMessage])
 
@@ -78,16 +91,16 @@ export default function ChatLayout() {
       {/* Sidebar: historial persistente */}
       <ChatSidebar
         chatHistory={chatHistory}
-        onSelect={handleSelectChat}        // si tu Sidebar todavía no usa, puedes ignorarlo
-        onNewChat={handleNewChat}          // idem
+        onSelect={handleSelectChat}
+        onNewChat={handleNewChat}
+        onRename={handleRenameChat}
+        onDelete={handleDeleteChat}
       />
 
       {/* Área principal del chat */}
       <div className="flex-1 flex flex-col">
         <ChatHeader onNewChat={handleNewChat} />
-
-        <ChatArea messages={messages} />
-
+        <ChatArea messages={messages} isTyping={isSending} />
         <ChatInput onSendMessage={handleSend} isSending={isSending} />
       </div>
     </div>

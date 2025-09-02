@@ -1,7 +1,11 @@
 export const runtime = 'nodejs';
 
 import { NextResponse } from 'next/server';
-import { auditSite, ensureReady as ensureMcp } from '../../../lib/mcp/facade.js';
+import {
+  auditSite,
+  ensureReady as ensureMcp,     // acepta "auditor" o nada (compat)
+  runTool,                       // genérico multi-MCP
+} from '../../../lib/mcp/facade.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -12,11 +16,13 @@ const STREAMING = String(process.env.AI_STREAMING ?? 'true').toLowerCase() === '
 
 const SYSTEM_PROMPT =
   process.env.AI_SYSTEM_PROMPT ||
-  'You are a helpful, concise assistant. If MCP_AUDIT is present, use it as primary evidence to produce a succinct, user-friendly report with findings, risks, and concrete fixes. Prefer bullets, short paragraphs, and clear next steps.';
+  'You are a helpful, concise assistant. If any MCP_* blocks are present, use them as primary evidence to produce a succinct, user-friendly answer with findings, risks, and concrete fixes. Prefer bullets, short paragraphs, and clear next steps.';
 
 // ---------------------- Intent & URL helpers ----------------------
 
 const SLASH_AUDIT_RE = /^\/audit\s+(\S+)/i;
+// /mcp <server> <tool> <json?>
+const SLASH_MCP_RE = /^\/mcp\s+([a-z0-9_-]+)\s+([a-z0-9_.-]+)(?:\s+([\s\S]+))?$/i;
 
 function normalizeMessages(body) {
   if (Array.isArray(body?.messages) && body.messages.length > 0) {
@@ -36,7 +42,19 @@ function detectAuditSlash(text) {
   return validHttpUrl(m[1]) ? m[1] : null;
 }
 
-// 2) NL intent: busca URL y señales léxicas en español/inglés.
+// 2) Generic slash: /mcp <server> <tool> <json?>
+function detectMcpSlash(text) {
+  const m = String(text || '').trim().match(SLASH_MCP_RE);
+  if (!m) return null;
+  const [, server, tool, jsonLike] = m;
+  let args = {};
+  if (jsonLike && jsonLike.trim()) {
+    try { args = JSON.parse(jsonLike); } catch { /* ignore parse errors */ }
+  }
+  return { server, tool, args };
+}
+
+// 3) NL intent para Bevstack auditor
 function detectAuditNL(messages, lastUserText) {
   const url =
     extractFirstUrl(lastUserText) ||
@@ -46,7 +64,6 @@ function detectAuditNL(messages, lastUserText) {
 
   const t = String(lastUserText || '').toLowerCase();
 
-  // Señales de intención
   const verbs = /\b(audit|auditar|auditor[ií]a|aud[ií]tame|audita|analiza|revisa|verifica|eval[uú]a|checa|check)\b/;
   const compliance = /\b(cumple|cumplimiento|compliance|match|compar(a|e)|similaridad|similarity|score|plantillas?|templates?)\b/;
   const policyWords = /\b(privacidad|privacy|pol[ií]tica|policy|t[ée]rminos|terms|tos|faq|soporte|ayuda|customer\s*support)\b/;
@@ -87,7 +104,6 @@ function validHttpUrl(u) {
 // ---------------------- POST handler ----------------------
 
 export async function POST(req) {
-  // quick guard for missing key
   if (!API_KEY) {
     return NextResponse.json({ error: 'ANTHROPIC_API_KEY is not set' }, { status: 500 });
   }
@@ -107,52 +123,51 @@ export async function POST(req) {
   const lastUser = [...messagesIn].reverse().find(m => m.role === 'user');
   const userText = lastUser?.content || '';
 
-  // Intención de auditoría: slash o lenguaje natural
-  let auditUrl =
-    detectAuditSlash(userText) ||
-    detectAuditNL(messagesIn, userText) ||
-    null;
+  // ---- Multi-MCP orchestration ----
+  // 1) /mcp … → ejecución directa del MCP indicado
+  // 2) /audit <url> o intención NL → auditor (Bevstack)
+  const mcpBlocks = [];
+  const mcpSlash = detectMcpSlash(userText);
 
-  // Si hay intención de auditoría, invoca MCP y embebe reporte en el prompt
-  let augmentedUserContent = userText;
-
-  if (auditUrl) {
+  if (mcpSlash) {
+    const { server, tool, args } = mcpSlash;
     try {
-      await ensureMcp(); // multi-MCP ready (auditor por defecto)
-      const report = await auditSite(auditUrl, {
-        timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000),
-      });
-
-      const summary = summarizeReport(report, auditUrl);
-      let rawJson = safeJsonString(report);
-      const MAX_JSON_CHARS = 70_000;
-      if (rawJson.length > MAX_JSON_CHARS) {
-        rawJson = rawJson.slice(0, MAX_JSON_CHARS) + '\n/* truncated */';
-      }
-
-      augmentedUserContent = [
-        userText,
-        '',
-        'MCP_AUDIT (summary):',
-        '```text',
-        summary,
-        '```',
-        '',
-        'MCP_AUDIT_JSON (verbatim):',
-        '```json',
-        rawJson,
-        '```',
-        '',
-        'Please analyze the audit: explain findings, risks, and propose clear, actionable fixes (bulleted). Keep it concise and friendly.',
-      ].join('\n');
+      await ensureMcp(server);
+      const result = typeof runTool === 'function'
+        ? await runTool(server, tool, args)
+        : await fallbackRun(server, tool, args);
+      const { summary, raw } = summarizeGeneric(server, tool, result);
+      mcpBlocks.push({ tag: `${server}.${tool}`, summary, raw });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json({ error: 'MCP audit failed', details: msg }, { status: 502 });
+      return NextResponse.json({ error: 'MCP call failed', details: msg, server, tool }, { status: 502 });
+    }
+  } else {
+    const auditUrl =
+      detectAuditSlash(userText) ||
+      detectAuditNL(messagesIn, userText) ||
+      null;
+
+    if (auditUrl) {
+      try {
+        await ensureMcp('auditor');
+        const report = await auditSite(auditUrl, {
+          timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000),
+        });
+        const { summary, raw } = summarizeAudit('auditor', 'audit_site', report, auditUrl);
+        mcpBlocks.push({ tag: 'auditor.audit_site', summary, raw });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return NextResponse.json({ error: 'MCP audit failed', details: msg }, { status: 502 });
+      }
     }
   }
 
-  // Construye payload de Anthropic (permite override opcional por request)
-  const outMessages = buildOutgoingMessages(messagesIn, augmentedUserContent, !!auditUrl);
+  // Incrusta los bloques MCP (si existen) en el último mensaje del usuario
+  const augmentedUserContent = embedMcpBlocks(userText, mcpBlocks);
+
+  // Construye payload de Anthropic (permite overrides por request)
+  const outMessages = buildOutgoingMessages(messagesIn, augmentedUserContent, mcpBlocks.length > 0);
   const payload = {
     model: (typeof body?.model === 'string' && body.model) ? body.model : MODEL,
     temperature: Number.isFinite(Number(body?.temperature)) ? Number(body.temperature) : TEMPERATURE,
@@ -170,6 +185,7 @@ export async function POST(req) {
       body: JSON.stringify(payload),
     });
 
+    // === NO STREAMING ===
     if (!STREAMING) {
       if (!res.ok) {
         const errTxt = await safeText(res);
@@ -178,10 +194,12 @@ export async function POST(req) {
           { status: 502 }
         );
       }
+      // DEVOLVER JSON CRUDO DE ANTHROPIC para que useChat() pueda leer content[].
       const json = await res.json();
-      return NextResponse.json({ text: extractText(json) });
+      return NextResponse.json(json);
     }
 
+    // === STREAMING (NDJSON) ===
     if (!res.ok || !res.body) {
       const errTxt = await safeText(res);
       return NextResponse.json(
@@ -216,7 +234,6 @@ export async function POST(req) {
 
                 try {
                   const evt = JSON.parse(data);
-                  // Tolerante a varios tipos de evento del Messages API
                   if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
                     const chunk = evt.delta?.text || '';
                     if (chunk) controller.enqueue(enc.encode(JSON.stringify({ type: 'delta', text: chunk }) + '\n'));
@@ -227,7 +244,7 @@ export async function POST(req) {
                     controller.enqueue(enc.encode(JSON.stringify({ type: 'error', error: evt.error?.message || 'upstream error' }) + '\n'));
                   }
                 } catch {
-                  // swallow malformed line
+                  // línea malformada, se ignora
                 }
               }
             }
@@ -285,8 +302,10 @@ function safeJsonString(obj) {
   try { return JSON.stringify(obj, null, 2); } catch { return '{}'; }
 }
 
-function buildOutgoingMessages(original, augmentedUserText, hadAudit) {
-  if (!hadAudit) return original;
+// ---------------------- Prompt building ----------------------
+
+function buildOutgoingMessages(original, augmentedUserText, hadMcpBlocks) {
+  if (!hadMcpBlocks) return original;
   const out = [...original];
   for (let i = out.length - 1; i >= 0; i--) {
     if (out[i].role === 'user') {
@@ -297,11 +316,37 @@ function buildOutgoingMessages(original, augmentedUserText, hadAudit) {
   return out;
 }
 
-// ---------------------- Audit summarizer ----------------------
+function embedMcpBlocks(userText, blocks = []) {
+  if (!blocks.length) return userText;
 
-function summarizeReport(report, url) {
+  const MAX_JSON_CHARS = 70_000;
+  const parts = [userText, ''];
+
+  for (const b of blocks) {
+    const rawJson = b.raw.length > MAX_JSON_CHARS ? b.raw.slice(0, MAX_JSON_CHARS) + '\n/* truncated */' : b.raw;
+    parts.push(
+      `MCP_${b.tag} (summary):`,
+      '```text',
+      b.summary,
+      '```',
+      '',
+      `MCP_${b.tag}_JSON (verbatim):`,
+      '```json',
+      rawJson,
+      '```',
+      ''
+    );
+  }
+
+  parts.push('Please analyze the MCP results above: explain findings, risks, and propose clear, actionable fixes (bulleted). Keep it concise and friendly.');
+  return parts.join('\n');
+}
+
+// ---------------------- MCP result summarizers ----------------------
+
+function summarizeAudit(server, tool, report, url) {
   const pct = formatScore(report?.overallScore);
-  const head = `Audit for ${url}\nOverall: ${report?.overallPass ? 'PASS' : 'FAIL'} (score ${pct})`;
+  const head = `Audit for ${url} [${server}.${tool}]\nOverall: ${report?.overallPass ? 'PASS' : 'FAIL'} (score ${pct})`;
   const pages = Array.isArray(report?.pages) ? report.pages : [];
   const lines = pages.map((p) => {
     const sim = p?.similarity != null ? `${p.similarity}` : '—';
@@ -313,8 +358,22 @@ function summarizeReport(report, url) {
         : '';
     return `- ${cap(p?.type || 'page')}: ${p?.pass ? 'PASS' : 'FAIL'} (sim ${sim}, miss ${miss})${at}${missingList}`;
   });
-  return [head, ...lines].join('\n');
+
+  return {
+    summary: [head, ...lines].join('\n'),
+    raw: safeJsonString(report),
+  };
 }
+
+function summarizeGeneric(server, tool, result) {
+  const json = safeJsonString(result);
+  let keys = [];
+  try { keys = Object.keys(result || {}); } catch {}
+  const head = `Result from ${server}.${tool}: ${keys.length ? 'keys=' + keys.join(', ') : 'no keys'}.`;
+  return { summary: head, raw: json };
+}
+
+// ---------------------- Small utils ----------------------
 
 function formatScore(s) {
   if (typeof s === 'number') {
@@ -326,4 +385,11 @@ function formatScore(s) {
 function cap(x) {
   const s = String(x || '');
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+async function fallbackRun(server, tool, args) {
+  if (server === 'auditor' && tool === 'audit_site' && args?.url) {
+    return auditSite(args.url, { timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000) });
+  }
+  throw new Error('runTool not available in facade; please add it for multi-MCP.');
 }
