@@ -1,7 +1,21 @@
+"use client"
+
 import { Bot, User } from "lucide-react"
+
+function formatTime(ts) {
+  try {
+    if (!ts) return ""
+    const d = ts instanceof Date ? ts : new Date(ts)
+    if (isNaN(d.getTime())) return ""
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+  } catch {
+    return ""
+  }
+}
 
 export default function ChatMessage({ message }) {
   const { content, isBot, timestamp } = message
+  const time = formatTime(timestamp)
 
   return (
     <div className={`flex gap-3 ${isBot ? "justify-start" : "justify-end"}`}>
@@ -19,9 +33,7 @@ export default function ChatMessage({ message }) {
         >
           <p className="text-sm leading-relaxed">{content}</p>
         </div>
-        <p className="text-xs text-slate-400 mt-1 px-2">
-          {timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-        </p>
+        <p className="text-xs text-slate-400 mt-1 px-2">{time}</p>
       </div>
 
       {!isBot && (

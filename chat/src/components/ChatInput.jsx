@@ -4,20 +4,36 @@ import { useState } from "react"
 import { Button } from "../ui/button"
 import { Send } from "lucide-react"
 
-export default function ChatInput({ onSendMessage }) {
+/**
+ * Props:
+ * - onSendMessage: (text:string) => Promise<void> | void
+ * - isSending: boolean  // deshabilita textarea y botón mientras streamea
+ */
+export default function ChatInput({ onSendMessage, isSending = false }) {
   const [input, setInput] = useState("")
+  const [isComposing, setIsComposing] = useState(false) // evita Enter durante IME
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
-    if (input.trim()) {
-      onSendMessage(input.trim())
+    if (isSending || isComposing) return
+
+    const value = input.trim()
+    if (!value) return
+
+    try {
+      // si onSendMessage es async, esperamos a que termine
+      await Promise.resolve(onSendMessage?.(value))
+      // limpia solo si no hubo error
       setInput("")
+    } catch {
+      // si falla, conservamos el texto para que el usuario pueda reintentar/editar
     }
   }
 
-  const handleKeyPress = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !isComposing) {
       e.preventDefault()
+      // delega al submit (honra isSending)
       handleSubmit(e)
     }
   }
@@ -29,16 +45,21 @@ export default function ChatInput({ onSendMessage }) {
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKeyDown}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
             placeholder="Escribe tu mensaje aquí..."
-            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700 text-white placeholder-slate-400 px-4 py-3 pr-12 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm"
+            className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700 text-white placeholder-slate-400 px-4 py-3 pr-12 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-sm disabled:opacity-60"
             rows={1}
             style={{ minHeight: "44px", maxHeight: "120px" }}
+            disabled={isSending}
+            aria-disabled={isSending}
+            aria-busy={isSending}
           />
         </div>
         <Button
           type="submit"
-          disabled={!input.trim()}
+          disabled={isSending || !input.trim() || isComposing}
           className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-3 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Send className="w-4 h-4" />
