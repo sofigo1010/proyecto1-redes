@@ -1,0 +1,13 @@
+{
+  "name": "mcp-auditor-example-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node ./index.js https://example.com",
+    "audit": "node ./index.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}

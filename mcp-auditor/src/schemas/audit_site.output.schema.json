@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_site.output",
+  "type": "object",
+  "properties": {
+    "overallPass": {
+      "type": "boolean",
+      "description": "Resultado global de la auditoría (true/false)."
+    },
+    "overallScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Puntaje global normalizado 0–1 (p.ej., promedio ponderado de páginas)."
+    },
+    "pages": {
+      "type": "array",
+      "description": "Resultados por tipo de página (privacy/terms/faq).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["privacy", "terms", "faq"],
+            "description": "Tipo de página evaluada."
+          },
+          "foundAt": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL donde se auditó el contenido."
+          },
+          "pass": {
+            "type": "boolean",
+            "description": "Resultado por página."
+          },
+          "similarity": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Similaridad TF-IDF con el template correspondiente (0–1)."
+          },
+          "sectionsFound": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Secciones requeridas presentes."
+          },
+          "sectionsMissing": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Secciones requeridas ausentes."
+          },
+          "typos": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Palabras detectadas como posibles errores ortográficos."
+          },
+          "typoRate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Tasa de errores ortográficos detectados (0–1)."
+          },
+          "headings": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Encabezados H1–H3 extraídos."
+          },
+          "qaCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Cantidad de pares Q&A detectados (solo para FAQ)."
+          },
+          "rawTextLength": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Longitud del texto plano analizado."
+          },
+          "notes": {
+            "type": "string",
+            "description": "Notas o comentarios adicionales."
+          },
+          "error": {
+            "type": "string",
+            "description": "Mensaje de error si la página no pudo procesarse."
+          }
+        },
+        "required": ["type", "pass", "similarity"],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": ["overallPass", "overallScore", "pages"],
+  "additionalProperties": true
+}

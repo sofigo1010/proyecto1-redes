@@ -1,0 +1,41 @@
+# Node & deps
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs & caches
+*.log
+*.log.*
+.logs/
+.eslintcache
+.npm/
+.cache/
+.tmp/
+tmp/
+temp/
+
+# Coverage / build artifacts
+coverage/
+.nyc_output/
+dist/
+build/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+*.swp
+*.swo
+
+# Env & local config
+.env
+.env.*
+!.env.example
+
+# NPM pack artifacts
+*.tgz
+
+# REPL & misc
+.node_repl_history

@@ -1,0 +1,53 @@
+{
+  "name": "mcp-auditor",
+  "version": "0.1.0",
+  "description": "MCP server (stdio) que expone la tool audit_site para auditar PP/TOS/FAQ 1:1 con tu API.",
+  "type": "module",
+  "bin": {
+    "mcp-auditor": "./bin/mcp-auditor.js"
+  },
+  "main": "./src/server/createServer.js",
+  "exports": {
+    ".": "./src/server/createServer.js",
+    "./server": "./src/server/createServer.js",
+    "./manifest": "./src/server/manifest.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "assets/",
+    "mcp.manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node ./bin/mcp-auditor.js",
+    "dev": "node --watch ./bin/mcp-auditor.js",
+    "lint": "echo \"(opcional) agrega eslint si quieres\""
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "mcp",
+    "json-rpc",
+    "stdio",
+    "auditor",
+    "privacy-policy",
+    "terms-of-service",
+    "faq"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "cheerio": "^1.0.0-rc.12",
+    "nspell": "^2.1.5",
+    "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "dictionary-en": "^4.0.0",
+    "hunspell-dict-en-us": "^0.1.0"
+  }
+}

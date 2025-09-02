@@ -1,0 +1,41 @@
+{
+  "name": "mcp-auditor",
+  "version": "0.1.0",
+  "description": "MCP stdio server that audits Privacy Policy, Terms of Service and FAQ using TF-IDF similarity + required sections + spellcheck.",
+  "license": "MIT",
+  "tools": [
+    {
+      "name": "audit_site",
+      "description": "Audit a website’s Privacy Policy, Terms of Service, and FAQ.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "format": "uri" }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_required_sections",
+      "description": "List required sections for a given document type.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["privacy", "terms", "faq"] }
+        },
+        "required": ["type"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "get_templates_info",
+      "description": "Return template files info (name, size, path).",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
+}

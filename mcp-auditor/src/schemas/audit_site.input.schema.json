@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit_site.input",
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL pública del sitio a auditar (http/https)."
+    }
+  },
+  "required": ["url"],
+  "additionalProperties": false
+}
