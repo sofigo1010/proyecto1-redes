@@ -11,6 +11,16 @@
 //   - MCP_auditor_MANIFEST  → ruta explícita a mcp.manifest.json
 //   - MCP_LOG_LEVEL         → nivel de logs para el servidor (se inyecta como LOG_LEVEL)
 //
+// Para "filesystem":
+//   - MCP_filesystem_CMD / _ARGS / _CWD  (sin MANIFEST)
+//     Por defecto: usa bin local ../mcp-filesystem/node_modules/.bin/mcp-server-filesystem
+//     ARGS por defecto: ".." (permite el repo raíz como directorio permitido)
+//
+// Para "git":
+//   - MCP_git_CMD / _ARGS / _CWD  (sin MANIFEST)
+//     Por defecto: usa ../mcp-git/.venv/bin/mcp-server-git si existe, o "mcp-server-git" del PATH
+//     ARGS por defecto: "--repository .."
+//
 // Además, si existe un repo hermano ../mcp-auditor, se detecta y se
 // construye un default razonable: `node ../mcp-auditor/bin/mcp-auditor.js`
 // con cwd en ese repo y MCP_MANIFEST_PATH apuntando a su manifest.
@@ -21,56 +31,100 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** Ubica la carpeta chat/ (este archivo vive en chat/src/config). */
+function getChatDir() {
+  return path.resolve(__dirname, '..', '..');
+}
+
 /**
- * Resuelve rutas candidatas al repo hermano "mcp-auditor".
- * Se usa para ofrecer defaults sin necesidad de configurar envs.
+ * ------- AUDITOR (Node) -------
+ * Defaults basados en repo hermano ../mcp-auditor
  */
 function siblingAuditorPaths() {
-  // Este archivo vive en chat/src/config → subir a chat/
-  const chatDir = path.resolve(__dirname, '..', '..');
-  // Repo hermano a la par de chat/
+  const chatDir = getChatDir();
   const repoDir = path.resolve(chatDir, '../mcp-auditor');
   const binJs = path.join(repoDir, 'bin', 'mcp-auditor.js');
   const manifest = path.join(repoDir, 'mcp.manifest.json');
   return { repoDir, binJs, manifest };
 }
 
-/**
- * Construye la línea de comando por defecto para el servidor "auditor".
- * Prioridad:
- *  1) MCP_auditor_CMD (línea completa provista por env)
- *  2) Repo hermano: usar el Node actual + bin local (si existe)
- *  3) Binario global en PATH: "mcp-auditor"
- */
 function defaultAuditorCmdLine() {
   const envLine = (process.env.MCP_auditor_CMD || '').trim();
   if (envLine) return envLine;
 
   const { binJs } = siblingAuditorPaths();
   if (fs.existsSync(binJs)) {
-    // Usa el mismo Node del proceso actual para evitar discrepancias de versiones
+    // Usa el Node actual para evitar discrepancias de versión
     return `${process.execPath} ${binJs}`;
   }
   // Fallback: bin global
   return 'mcp-auditor';
 }
 
-/**
- * Determina cwd/env por defecto para "auditor" si el repo hermano existe.
- * - cwd: repo raíz de mcp-auditor (para que resuelva assets relativos)
- * - MCP_MANIFEST_PATH: solo si no se definió ya por env
- */
 function defaultAuditorCwdAndEnv() {
   const out = { cwd: undefined, env: {} };
   const { repoDir, manifest } = siblingAuditorPaths();
-
-  if (fs.existsSync(repoDir)) {
-    out.cwd = repoDir; // correr desde la raíz del repo hermano
-  }
+  if (fs.existsSync(repoDir)) out.cwd = repoDir;
   if (!process.env.MCP_auditor_MANIFEST && fs.existsSync(manifest)) {
     out.env.MCP_MANIFEST_PATH = manifest;
   }
   return out;
+}
+
+/**
+ * ------- FILESYSTEM (Node) -------
+ * Defaults basados en repo hermano ../mcp-filesystem
+ */
+function siblingFilesystemPaths() {
+  const chatDir = getChatDir();
+  const repoDir = path.resolve(chatDir, '../mcp-filesystem');
+  // Bin típico instalado por npm
+  const binLocal = path.join(repoDir, 'node_modules', '.bin', 'mcp-server-filesystem');
+  return { repoDir, binLocal };
+}
+
+function defaultFilesystemCmdLine() {
+  const envLine = (process.env.MCP_filesystem_CMD || '').trim();
+  if (envLine) return envLine;
+
+  const { binLocal } = siblingFilesystemPaths();
+  if (fs.existsSync(binLocal)) return binLocal;
+
+  // Fallback: bin global (vía npx/PATH)
+  return 'mcp-server-filesystem';
+}
+
+function defaultFilesystemCwd() {
+  const { repoDir } = siblingFilesystemPaths();
+  return fs.existsSync(repoDir) ? repoDir : undefined;
+}
+
+/**
+ * ------- GIT (Python) -------
+ * Defaults basados en repo hermano ../mcp-git
+ */
+function siblingGitPaths() {
+  const chatDir = getChatDir();
+  const repoDir = path.resolve(chatDir, '../mcp-git');
+  // Virtualenv típico en macOS/Linux
+  const venvBin = path.join(repoDir, '.venv', 'bin', 'mcp-server-git');
+  return { repoDir, venvBin };
+}
+
+function defaultGitCmdLine() {
+  const envLine = (process.env.MCP_git_CMD || '').trim();
+  if (envLine) return envLine;
+
+  const { venvBin } = siblingGitPaths();
+  if (fs.existsSync(venvBin)) return venvBin;
+
+  // Fallback: bin global del PATH (pipx/uvx/pip install --user)
+  return 'mcp-server-git';
+}
+
+function defaultGitCwd() {
+  const { repoDir } = siblingGitPaths();
+  return fs.existsSync(repoDir) ? repoDir : undefined;
 }
 
 /**
@@ -82,25 +136,57 @@ function defaultAuditorCwdAndEnv() {
  * Para añadir más MCPs en el futuro, agregar otro bloque al objeto retornado.
  */
 export default function getMcpServersConfig() {
-  // Construye el comando base y anexa argumentos opcionales
-  const baseCmd = defaultAuditorCmdLine();
-  const extraArgs = (process.env.MCP_auditor_ARGS || '').trim();
-  const cmdLine = extraArgs ? `${baseCmd} ${extraArgs}` : baseCmd;
+  // ===== Auditor =====
+  const auditorBaseCmd = defaultAuditorCmdLine();
+  const auditorExtraArgs = (process.env.MCP_auditor_ARGS || '').trim();
+  const auditorCmdLine = auditorExtraArgs ? `${auditorBaseCmd} ${auditorExtraArgs}` : auditorBaseCmd;
+  const auditorDefaults = defaultAuditorCwdAndEnv();
 
-  // Defaults derivados del repo hermano si está presente
-  const defaults = defaultAuditorCwdAndEnv();
+  // ===== Filesystem =====
+  const fsBaseCmd = defaultFilesystemCmdLine();
+  // Por defecto, permitir el repo raíz (carpeta padre de chat/) como directorio permitido
+  const fsDefaultArgs = '..';
+  const fsExtraArgs = (process.env.MCP_filesystem_ARGS || fsDefaultArgs).trim();
+  const fsCmdLine = fsExtraArgs ? `${fsBaseCmd} ${fsExtraArgs}` : fsBaseCmd;
+  const fsCwd = (process.env.MCP_filesystem_CWD || '').trim() || defaultFilesystemCwd();
+
+  // ===== Git =====
+  const gitBaseCmd = defaultGitCmdLine();
+  // Por defecto, apuntar al repo raíz como --repository ..
+  const gitDefaultArgs = '--repository ..';
+  const gitExtraArgs = (process.env.MCP_git_ARGS || gitDefaultArgs).trim();
+  const gitCmdLine = gitExtraArgs ? `${gitBaseCmd} ${gitExtraArgs}` : gitBaseCmd;
+  const gitCwd = (process.env.MCP_git_CWD || '').trim() || defaultGitCwd();
 
   return {
     // ---- Servidor Bevstack Auditor (actual) ----
     auditor: {
-      cmdLine,
+      cmdLine: auditorCmdLine,
       // Precedencia de cwd: env explícito → default basado en repo hermano → sin cwd
-      cwd: (process.env.MCP_auditor_CWD || '').trim() || defaults.cwd,
+      cwd: (process.env.MCP_auditor_CWD || '').trim() || auditorDefaults.cwd,
       env: {
         // Defaults (manifest detectado) primero, y luego overrides explícitos
-        ...(defaults.env || {}),
+        ...(auditorDefaults.env || {}),
         ...(process.env.MCP_LOG_LEVEL ? { LOG_LEVEL: process.env.MCP_LOG_LEVEL } : {}),
         ...(process.env.MCP_auditor_MANIFEST ? { MCP_MANIFEST_PATH: process.env.MCP_auditor_MANIFEST } : {}),
+      },
+    },
+
+    // ---- Servidor Filesystem (oficial MCP) ----
+    filesystem: {
+      cmdLine: fsCmdLine,
+      cwd: fsCwd,
+      env: {
+        ...(process.env.MCP_LOG_LEVEL ? { LOG_LEVEL: process.env.MCP_LOG_LEVEL } : {}),
+      },
+    },
+
+    // ---- Servidor Git (oficial MCP) ----
+    git: {
+      cmdLine: gitCmdLine,
+      cwd: gitCwd,
+      env: {
+        ...(process.env.MCP_LOG_LEVEL ? { LOG_LEVEL: process.env.MCP_LOG_LEVEL } : {}),
       },
     },
 
@@ -110,7 +196,6 @@ export default function getMcpServersConfig() {
     //   cwd: (process.env.MCP_search_CWD || '').trim() || undefined,
     //   env: {
     //     ...(process.env.MCP_LOG_LEVEL ? { LOG_LEVEL: process.env.MCP_LOG_LEVEL } : {}),
-    //     ...(process.env.MCP_search_MANIFEST ? { MCP_MANIFEST_PATH: process.env.MCP_search_MANIFEST } : {}),
     //   },
     // },
   };
