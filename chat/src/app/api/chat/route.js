@@ -5,6 +5,7 @@ import {
   auditSite,
   ensureReady as ensureMcp,     // acepta "auditor" o nada (compat)
   runTool,                       // genérico multi-MCP
+  listTools,                     // listado dinámico para resolver nombres de tools
 } from '../../../lib/mcp/facade.js';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
@@ -18,7 +19,9 @@ const SYSTEM_PROMPT =
   process.env.AI_SYSTEM_PROMPT ||
   'You are a helpful, concise assistant. If any MCP_* blocks are present, use them as primary evidence to produce a succinct, user-friendly answer with findings, risks, and concrete fixes. Prefer bullets, short paragraphs, and clear next steps.';
 
-// ---------------------- Intent & URL helpers ----------------------
+
+// Este bloque contiene utilidades para normalizar mensajes, detectar
+// comandos “slash”, y extraer URLs. Se mantiene acotado y puro.
 
 const SLASH_AUDIT_RE = /^\/audit\s+(\S+)/i;
 // /mcp <server> <tool> <json?>
@@ -101,7 +104,129 @@ function validHttpUrl(u) {
   }
 }
 
-// ---------------------- POST handler ----------------------
+
+// Este bloque permite entender órdenes naturales para Git/FS y ejecutarlas.
+// Se diseñó para que sea tolerante a variaciones (“crea/crear/crear un repo”).
+// Importante: el servidor MCP “git” está anclado a un repositorio (ej. “..”),
+// por lo que “crear un repositorio llamado X” se interpreta, de forma segura,
+// como “crear un directorio X dentro del repo actual, añadir README y hacer
+// commit en el repo actual (no se crea un subrepo con `git init` dentro)”.
+
+const GIT_BOOTSTRAP_PATTERNS = [
+  // es
+  /\bcrea(?:r)?\s+un\s+repositorio\s+(?:llamado|nombrado)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\bagrega?\s+un\s+readme\b[\s\S]*?\bque\s+diga\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+y\s+haga?\s+el?\s+commit|\s*y\s+haz\s+commit|\s*haz\s+commit|\s*$)/i,
+  /\bcrea(?:r)?\s+un\s+repositorio\s+(?:llamado|nombrado)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\b(readme)\b[\s\S]*?\b(que\s+diga|con\s+contenido)\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+y\s+commit|\s*$)/i,
+  // en
+  /\bcreate\s+(?:a\s+)?repo(?:sitory)?\s+(?:named|called)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\badd\s+(?:a\s+)?readme\b[\s\S]*?\bsay(?:s)?\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+and\s+commit|\s*$)/i,
+];
+
+function detectGitBootstrap(text) {
+  const t = String(text || '');
+  for (const re of GIT_BOOTSTRAP_PATTERNS) {
+    const m = t.match(re);
+    if (m) {
+      // Heurística: algunos patrones capturan 2 o 4 grupos; normalizar.
+      const name = (m[1] || '').trim().replace(/^\.\/+/, '').replace(/^\/+/, '');
+      const readme = (m[2] && !m[3]) ? m[2] : (m[4] || '');
+      const readmeText = String(readme || '').trim();
+      if (name && readmeText) {
+        return { repoName: name, readmeText: readmeText };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resuelve un tool por nombre candidato (permite variaciones entre servidores).
+ * Devuelve la primera coincidencia presente en listTools(server).
+ * Ejemplo: pickTool('git', ['git_add','add','stage'])
+ */
+async function pickTool(server, candidates) {
+  const tools = await listTools(server).catch(() => []);
+  const names = new Set((tools || []).map(t => t?.name).filter(Boolean));
+  for (const c of candidates) {
+    if (names.has(c)) return c;
+  }
+  throw new Error(`No matching tool in ${server}: tried [${candidates.join(', ')}]`);
+}
+
+/**
+ * Ejecuta la secuencia “bootstrap de módulo” dentro del repo actual:
+ * - Crea carpeta <repoName> si no existe (filesystem)
+ * - Escribe README.md con el contenido indicado (filesystem)
+ * - git add y git commit de los cambios (git)
+ * Retorna un arreglo de bloques para incrustar en el prompt (summary+raw).
+ */
+async function runGitBootstrapFlow({ repoName, readmeText }) {
+  // Asegura servidores activos
+  await ensureMcp('filesystem');
+  await ensureMcp('git');
+
+  // Resuelve herramientas disponibles (tolerante a prefijos git_)
+  const mkdirTool   = await pickTool('filesystem', ['create_directory', 'mkdir', 'make_directory']);
+  const writeTool   = await pickTool('filesystem', ['write_file', 'save_file', 'write']);
+  const addTool     = await pickTool('git',        ['git_add', 'add', 'stage']);
+  const commitTool  = await pickTool('git',        ['git_commit', 'commit']);
+
+  // Paths y mensajes
+  const dirPath = repoName; // relativo al root permitido (“..”)
+  const readmePath = `${repoName.replace(/\/+$/,'')}/README.md`;
+  const commitMsg = `chore(${repoName}): add README`;
+
+  const blocks = [];
+
+  // 1) mkdir
+  const mkRes = await runTool('filesystem', mkdirTool, { path: dirPath }).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('filesystem', mkdirTool, summarizeGeneric('filesystem', mkdirTool, mkRes)));
+
+  // 2) write README.md
+  const wrRes = await runTool('filesystem', writeTool, {
+    path: readmePath,
+    content: String(readmeText),
+  }).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('filesystem', writeTool, summarizeGeneric('filesystem', writeTool, wrRes)));
+
+  // 3) git add (prueba esquemas comunes)
+  const addRes = await tryGitAdd(addTool, readmePath);
+  blocks.push(tagBlock('git', addTool, summarizeGeneric('git', addTool, addRes)));
+
+  // 4) git commit
+  const cmRes = await runTool('git', commitTool, { message: commitMsg }).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('git', commitTool, summarizeGeneric('git', commitTool, cmRes)));
+
+  return { blocks, commitMsg };
+}
+
+/**
+ * Intenta distintas variantes de argumentos para “git add”,
+ * ya que algunos servidores esperan {files}, otros {paths} o {pathspecs}.
+ */
+async function tryGitAdd(addTool, filePath) {
+  const TRY = [
+    { files: [filePath] },
+    { paths: [filePath] },
+    { pathspecs: [filePath] },
+    { pattern: filePath },
+    { pathspec: filePath },
+  ];
+  for (const args of TRY) {
+    try {
+      const r = await runTool('git', addTool, args);
+      // Si no explota, se asume éxito.
+      return r;
+    } catch { /* intenta próxima variante */ }
+  }
+  // Último intento: sin args (algunos exponen “add all”)
+  try {
+    return await runTool('git', addTool, {});
+  } catch (e) {
+    throw new Error(`git add failed for ${filePath}: ${e?.message || e}`);
+  }
+}
+
+
+// Este handler coordina la detección de intenciones (slash y NL), ejecuta MCPs cuando corresponde y forwardea a Anthropic con streaming NDJSON.
 
 export async function POST(req) {
   if (!API_KEY) {
@@ -126,6 +251,7 @@ export async function POST(req) {
   // ---- Multi-MCP orchestration ----
   // 1) /mcp … → ejecución directa del MCP indicado
   // 2) /audit <url> o intención NL → auditor (Bevstack)
+  // 3) NL git bootstrap (crear carpeta+README+commit en repo actual)
   const mcpBlocks = [];
   const mcpSlash = detectMcpSlash(userText);
 
@@ -159,6 +285,21 @@ export async function POST(req) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return NextResponse.json({ error: 'MCP audit failed', details: msg }, { status: 502 });
+      }
+    } else {
+      // --- Detección NL Git bootstrap ---
+      const gitNL = detectGitBootstrap(userText);
+      if (gitNL) {
+        try {
+          const { blocks, commitMsg } = await runGitBootstrapFlow(gitNL);
+          mcpBlocks.push(...blocks);
+          // Agrega un bloque sintético de “resumen de acciones”
+          const head = `Git/FS bootstrap sequence:\n- dir: ${gitNL.repoName}\n- file: ${gitNL.repoName}/README.md\n- commit: ${commitMsg}`;
+          mcpBlocks.push({ tag: 'plan.git_bootstrap', summary: head, raw: safeJsonString({ ...gitNL, commitMsg }) });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return NextResponse.json({ error: 'Git bootstrap failed', details: msg }, { status: 502 });
+        }
       }
     }
   }
@@ -270,7 +411,8 @@ export async function POST(req) {
   }
 }
 
-// ---------------------- Anthropic helpers ----------------------
+
+// Este bloque encapsula headers y parsers varios. Se mantiene sin dependencias.
 
 function anthropicHeaders() {
   return {
@@ -302,7 +444,8 @@ function safeJsonString(obj) {
   try { return JSON.stringify(obj, null, 2); } catch { return '{}'; }
 }
 
-// ---------------------- Prompt building ----------------------
+
+// Este bloque inserta los resultados MCP en el último mensaje del usuario para que el modelo tenga “evidencia” autocontenida y verificable.
 
 function buildOutgoingMessages(original, augmentedUserText, hadMcpBlocks) {
   if (!hadMcpBlocks) return original;
@@ -342,7 +485,7 @@ function embedMcpBlocks(userText, blocks = []) {
   return parts.join('\n');
 }
 
-// ---------------------- MCP result summarizers ----------------------
+// Este bloque produce resúmenes compactos de resultados para incrustar en el prompt de salida.
 
 function summarizeAudit(server, tool, report, url) {
   const pct = formatScore(report?.overallScore);
@@ -373,7 +516,7 @@ function summarizeGeneric(server, tool, result) {
   return { summary: head, raw: json };
 }
 
-// ---------------------- Small utils ----------------------
+// Utilidades generales de formato y helpers para MCP.
 
 function formatScore(s) {
   if (typeof s === 'number') {
@@ -385,6 +528,10 @@ function formatScore(s) {
 function cap(x) {
   const s = String(x || '');
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function tagBlock(server, tool, { summary, raw }) {
+  return { tag: `${server}.${tool}`, summary, raw };
 }
 
 async function fallbackRun(server, tool, args) {

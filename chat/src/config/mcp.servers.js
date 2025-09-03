@@ -159,7 +159,7 @@ export default function getMcpServersConfig() {
   const gitCwd = (process.env.MCP_git_CWD || '').trim() || defaultGitCwd();
 
   return {
-    // ---- Servidor Bevstack Auditor (actual) ----
+    // ---- Servidor Bevstack Auditor ----
     auditor: {
       cmdLine: auditorCmdLine,
       // Precedencia de cwd: env explícito → default basado en repo hermano → sin cwd
