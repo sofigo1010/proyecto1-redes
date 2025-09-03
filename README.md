@@ -1,175 +1,159 @@
-# proyecto1-redes — Chat (Next.js) + mcp-auditor (MCP stdio)
+# proyecto1-redes — Chat (Next.js) + MCP stdio (auditor, filesystem, git)
 
-This repo contains two sibling projects that work together:
+This repository provides a chat UI (Next.js) that talks to **Anthropic Claude** and can invoke local **MCP stdio** servers. It is **multi‑MCP** and streams responses while embedding MCP results (summary + raw JSON) into the prompt.
 
-- **chat/** – a Next.js chat UI that talks to **Anthropic Claude** and can call local **MCP stdio servers** (multi‑MCP ready). It streams responses and embeds MCP results (summary + raw JSON) into the prompt.
-- **mcp-auditor/** – an MCP server (over stdio) exposing `audit_site`, which audits a website’s **Privacy Policy**, **Terms of Service**, and **FAQ** against PDF templates (TF‑IDF cosine, section checks, spellcheck).
+## What’s included
 
-> The chat orchestrator can call the auditor automatically (natural‑language intent) or via slash commands, then ask Claude to produce a concise, user‑friendly report.
+- **chat/** – Next.js app (Claude + multi‑MCP orchestrator over stdio)
+- **mcp-auditor/** – MCP server (Node) exposing `audit_site` (checks Privacy/Terms/FAQ pages against PDF templates)
+- **mcp-filesystem/** – MCP server (Node) for **filesystem** operations (create folders/files, read, etc.)
+- **mcp-git/** – MCP server (Python) for **git** operations (stage/commit and more)
 
----
-
-## Repo layout
-
-```
-proyecto1-redes/
-├─ chat/          # Next.js app (Claude + multi-MCP orchestrator)
-└─ mcp-auditor/   # MCP stdio server exposing `audit_site`
-```
+> MCP servers are auto‑started by the chat service using `chat/src/config/mcp.servers.js`. You can override command/args/CWD via environment variables if your local paths differ.
 
 ---
 
-## Objectives
-
-1. Provide a clean, modern chat that can answer general questions using Claude.
-2. Seamlessly invoke local MCP tools when useful (e.g., Bevstack site audits).
-3. Stream results and persist multi‑session chat history on the client.
-4. Be **multi‑MCP** from day one (easy to add more servers).
-
----
-
-## Quick start (install **both** chat and auditor)
+## Quick start (from a fresh clone)
 
 ### Prerequisites
-- Node.js **≥ 18.17**
+
+- **Node.js ≥ 18.17**
+- **Git**
+- **Python 3.10+** (for the git MCP)
 - An **Anthropic API key**
 
-### 1) Install **mcp-auditor**
-This project expects the auditor to live as a sibling folder at `../mcp-auditor` relative to `chat/`.
+### 1) Install each MCP server and the chat
+
+From the repository root:
 
 ```bash
-# from repo root
+# mcp-auditor (Node)
 cd mcp-auditor
 npm i
+
+# mcp-filesystem (Node)
+cd ../mcp-filesystem
+npm i
+
+# mcp-git (Python)
+cd ../mcp-git
+python -m venv .venv
+source .venv/bin/activate     # macOS/Linux
+# .venv\Scripts\activate    # Windows (PowerShell)
+pip install .
 ```
 
-Notes:
-- The server bundles PDF templates under `mcp-auditor/assets/templates/` (`PP.pdf`, `TOS.pdf`, `CS.pdf`). You can replace them; the matcher adapts automatically.
-- Optional Hunspell dictionaries live in `mcp-auditor/assets/dictionaries/`. If missing, spellcheck disables itself gracefully.
+Then install the chat app and set up environment variables:
 
-You can manually smoke‑test the server:
 ```bash
-# Still inside mcp-auditor/
-printf '%s
-' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node ./bin/mcp-auditor.js
-
-printf '%s
-' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"audit_site","arguments":{"url":"https://mijenta-tequila.com"}}}' | node ./bin/mcp-auditor.js
-```
-
-### 2) Install **chat**
-```bash
-# from repo root
-cd chat
+cd ../chat
 npm i
 ```
 
-Create `chat/.env.local` with at least your key:
+Create **`chat/.env.local`** (minimal example):
 
 ```env
-# ===============================
-# Anthropic / Claude (server-side)
-# ===============================
-# REQUIRED: put your real key here (do NOT commit this file)
+# Anthropic / Claude
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Model defaults (overridable per request)
 AI_MODEL=claude-3-5-haiku-20241022
 AI_TEMPERATURE=0.7
 AI_MAX_OUTPUT_TOKENS=1024
 AI_STREAMING=true
 
-# ===============================
-# MCP (mcp-auditor) integration
-# ===============================
-# Logging and timeouts
+# MCP logging, timeouts
 MCP_LOG_LEVEL=info
 MCP_REQUEST_TIMEOUT_MS=30000
 MCP_IDLE_TTL_MS=120000
 
-# By default the chat auto-detects the sibling server at ../mcp-auditor.
-# If your paths differ, uncomment and adjust:
+# Optional overrides if your paths differ:
 # MCP_auditor_CMD=node ../mcp-auditor/bin/mcp-auditor.js
 # MCP_auditor_CWD=../mcp-auditor
-# MCP_auditor_ARGS=
-# MCP_auditor_MANIFEST=../mcp-auditor/mcp.manifest.json
+# MCP_filesystem_ARGS=..
+# MCP_git_ARGS=--repository ..
 ```
 
-### 3) (Optional) Smoke test MCP from **chat/**
-```bash
-npm run smoke:mcp
-```
-This spins up the local **mcp-auditor** and runs a sample `audit_site` call.
+### 2) Run the chat (dev)
 
-### 4) Run the chat (dev)
 ```bash
 npm run dev
 # open http://localhost:3000
 ```
 
-Type normally to chat with Claude. Example MCP usage:
-- Natural language: “Audit https://mijenta-tequila.com and compare with Bevstack templates.”
-- Slash command: `/audit https://mijenta-tequila.com`
-- Generic MCP call: `/mcp auditor get_templates_info`
+The chat will start/stop MCP processes automatically as needed.
 
 ---
 
-## Run **mcp-auditor** standalone (manual testing)
+## Source of filesystem & git MCP servers
 
-If you want to run the auditor by itself and send JSON‑RPC messages manually:
+The **filesystem** and **git** MCP servers used in this project were sourced from the official
+**Model Context Protocol** servers repository (Anthropic):
 
-```bash
-cd mcp-auditor
-npm i
-```
+https://github.com/modelcontextprotocol/servers/tree/main/src
 
-Start it by piping JSON‑RPC over **STDIN** (NDJSON framing). Examples:
+They are kept locally in `mcp-filesystem/` and `mcp-git/` so you can develop and run everything
+in one workspace without global installs. You can re‑sync from the upstream repo whenever you
+want to pick up improvements.
 
-### List tools
-```bash
-printf '%s
-' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node ./bin/mcp-auditor.js
-```
+---
 
-### Call `audit_site`
-```bash
-printf '%s
-' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"audit_site","arguments":{"url":"https://mijenta-tequila.com"}}}' | node ./bin/mcp-auditor.js
-```
+## Filesystem & Git: minimal examples to test
 
-### Get template info
-```bash
-printf '%s
-' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_templates_info","arguments":{}}}' | node ./bin/mcp-auditor.js
+Below are the **exact examples** that were verified in this project. Paste them into the chat input exactly as written:
+
+```text
+/mcp filesystem create_directory {"path":"/Users/sofig/Documents/GitHub/proyecto1-redes/loba"}
+
+/mcp filesystem write_file {"path":"/Users/sofig/Documents/GitHub/proyecto1-redes/loba/morchis.txt","content":"este es mi comich desde el mcp"}
+
+/mcp git git_add { "repo_path":"/Users/sofig/Documents/GitHub/proyecto1-redes", "files":["loba/morchis.txt"] }
+
+/mcp git git_commit { "repo_path":"/Users/sofig/Documents/GitHub/proyecto1-redes", "message":"feat: add morchis.txt en loba" }
 ```
 
 > Notes
-> - The server reads one JSON‑RPC message per line and prints one JSON line per response.
-> - It supports both NDJSON and LSP‑style framing (auto‑detects from the first message).
-> - PDF templates are bundled under `mcp-auditor/assets/templates/`.
+>
+> - The filesystem MCP is configured to allow the repository root as a safe base. Absolute paths inside that root work as shown.
+> - The git MCP in this setup is anchored to the **repository root** via `--repository ..`, so `repo_path` in examples points to the root folder.
 
 ---
 
-## Adding another MCP
+## Important limitation: **LLMs cannot push to a repository**
 
-1. Install/clone the MCP server locally.
-2. Register it in `chat/src/config/mcp.servers.js` (command, cwd, env).
-3. Call it with `/mcp <server> <tool> <json?>` or add intent rules in `chat/src/app/api/chat/route.js`.
+For security and credential reasons, the chat/LLM **cannot perform `git push`** (or any credentialed network operation) on your behalf. Pushing requires your local credentials/agent and should be done manually in your terminal from the repository root, for example:
 
-The registry handles stdio lifecycles, JSON‑RPC over NDJSON, per‑request timeouts, and idle auto‑shutdown.
+```bash
+git push -u origin main
+```
+
+If a remote isn’t set yet, add it once and then push:
+
+```bash
+git remote add origin git@github.com:<user>/<repo>.git   # or HTTPS URL
+git push -u origin main
+```
+
+---
+
+## Auditor MCP (overview)
+
+You can ask the chat to audit a site’s Privacy/Terms/FAQ pages against built‑in templates (TF‑IDF cosine, section checks, optional spellcheck). Example prompts:
+
+- “Audit https://example.com and compare with the Bevstack templates.”
+- `/audit https://example.com`
+
+The chat embeds the auditor’s structured results into the prompt and asks Claude for a concise, user‑friendly report.
 
 ---
 
 ## Troubleshooting
 
-- **“ANTHROPIC_API_KEY is not set”** → add it to `chat/.env.local`.
-- **MCP path issues** → set `MCP_auditor_CMD`/`CWD` explicitly.
-- **No streaming** → the API falls back to a single JSON response; the UI still renders it.
-- **Auditor env** → thresholds/timeouts/spellcheck are configured inside `mcp-auditor/`.
+- **Initialization race warnings** in logs (e.g., “Received request before initialization was complete”) can appear when an MCP is still starting up; simply retry your command.
+- **Filesystem ‘parent directory does not exist’** → create the folder first via `create_directory`.
+- **Environment differences** → override `MCP_*` variables in `chat/.env.local` to match your paths.
 
 ---
 
 ## License
 
-**Proprietary / All rights reserved.**  
-No license is granted to copy, distribute, or modify this code without explicit permission from the author.
+**Proprietary / All rights reserved.** No license is granted to copy, distribute, or modify this code without explicit permission from the author.

@@ -3,10 +3,11 @@ export const runtime = 'nodejs';
 import { NextResponse } from 'next/server';
 import {
   auditSite,
-  ensureReady as ensureMcp,     // acepta "auditor" o nada (compat)
-  runTool,                       // genérico multi-MCP
-  listTools,                     // listado dinámico para resolver nombres de tools
+  ensureReady as ensureMcp,
+  runTool,
+  listTools,
 } from '../../../lib/mcp/facade.js';
+import path from 'node:path';
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -15,17 +16,17 @@ const TEMPERATURE = Number(process.env.AI_TEMPERATURE ?? 0.7);
 const MAX_OUTPUT_TOKENS = Number(process.env.AI_MAX_OUTPUT_TOKENS ?? 1024);
 const STREAMING = String(process.env.AI_STREAMING ?? 'true').toLowerCase() === 'true';
 
+const BYPASS_ON_MCP = String(process.env.AI_BYPASS_ON_MCP || '').toLowerCase() === 'true';
+const FALLBACK_ON_ERR = String(process.env.AI_FALLBACK_ON_UPSTREAM_ERROR ?? 'true').toLowerCase() !== 'false';
+
 const SYSTEM_PROMPT =
   process.env.AI_SYSTEM_PROMPT ||
   'You are a helpful, concise assistant. If any MCP_* blocks are present, use them as primary evidence to produce a succinct, user-friendly answer with findings, risks, and concrete fixes. Prefer bullets, short paragraphs, and clear next steps.';
 
-
-// Este bloque contiene utilidades para normalizar mensajes, detectar
-// comandos “slash”, y extraer URLs. Se mantiene acotado y puro.
+// ---------------------- Intent helpers ----------------------
 
 const SLASH_AUDIT_RE = /^\/audit\s+(\S+)/i;
-// /mcp <server> <tool> <json?>
-const SLASH_MCP_RE = /^\/mcp\s+([a-z0-9_-]+)\s+([a-z0-9_.-]+)(?:\s+([\s\S]+))?$/i;
+const SLASH_MCP_RE = /^\/mcp\s+([a-z0-9_-]+)\s+([a-z0-9_.\/-]+)(?:\s+([\s\S]+))?$/i;
 
 function normalizeMessages(body) {
   if (Array.isArray(body?.messages) && body.messages.length > 0) {
@@ -38,26 +39,24 @@ function normalizeMessages(body) {
   return content ? [{ role: 'user', content }] : [];
 }
 
-// 1) Slash command: /audit <url>
 function detectAuditSlash(text) {
   const m = String(text || '').trim().match(SLASH_AUDIT_RE);
   if (!m) return null;
   return validHttpUrl(m[1]) ? m[1] : null;
 }
 
-// 2) Generic slash: /mcp <server> <tool> <json?>
 function detectMcpSlash(text) {
   const m = String(text || '').trim().match(SLASH_MCP_RE);
   if (!m) return null;
   const [, server, tool, jsonLike] = m;
   let args = {};
   if (jsonLike && jsonLike.trim()) {
-    try { args = JSON.parse(jsonLike); } catch { /* ignore parse errors */ }
+    try { args = JSON.parse(jsonLike); } catch {}
   }
   return { server, tool, args };
 }
 
-// 3) NL intent para Bevstack auditor
+// Auditor NL
 function detectAuditNL(messages, lastUserText) {
   const url =
     extractFirstUrl(lastUserText) ||
@@ -66,18 +65,15 @@ function detectAuditNL(messages, lastUserText) {
   if (!url) return null;
 
   const t = String(lastUserText || '').toLowerCase();
-
   const verbs = /\b(audit|auditar|auditor[ií]a|aud[ií]tame|audita|analiza|revisa|verifica|eval[uú]a|checa|check)\b/;
   const compliance = /\b(cumple|cumplimiento|compliance|match|compar(a|e)|similaridad|similarity|score|plantillas?|templates?)\b/;
   const policyWords = /\b(privacidad|privacy|pol[ií]tica|policy|t[ée]rminos|terms|tos|faq|soporte|ayuda|customer\s*support)\b/;
   const brand = /\bbevstack\b/;
-
   let score = 0;
   if (verbs.test(t)) score += 1;
   if (compliance.test(t)) score += 1;
   if (policyWords.test(t)) score += 1;
   if (brand.test(t)) score += 1;
-
   return score >= 2 ? url : null;
 }
 
@@ -86,7 +82,6 @@ function extractFirstUrl(text) {
   const m = String(text || '').match(re);
   return validHttpUrl(m?.[1]) ? m[1] : null;
 }
-
 function findLastUrlInHistory(messages = []) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const u = extractFirstUrl(messages[i]?.content);
@@ -94,115 +89,102 @@ function findLastUrlInHistory(messages = []) {
   }
   return null;
 }
-
 function validHttpUrl(u) {
-  try {
-    const url = new URL(String(u));
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch {
-    return false;
-  }
+  try { const url = new URL(String(u)); return url.protocol === 'http:' || url.protocol === 'https:'; }
+  catch { return false; }
 }
 
-
-// Este bloque permite entender órdenes naturales para Git/FS y ejecutarlas.
-// Se diseñó para que sea tolerante a variaciones (“crea/crear/crear un repo”).
-// Importante: el servidor MCP “git” está anclado a un repositorio (ej. “..”),
-// por lo que “crear un repositorio llamado X” se interpreta, de forma segura,
-// como “crear un directorio X dentro del repo actual, añadir README y hacer
-// commit en el repo actual (no se crea un subrepo con `git init` dentro)”.
+// ---------------------- NL intents Git/FS ----------------------
 
 const GIT_BOOTSTRAP_PATTERNS = [
-  // es
   /\bcrea(?:r)?\s+un\s+repositorio\s+(?:llamado|nombrado)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\bagrega?\s+un\s+readme\b[\s\S]*?\bque\s+diga\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+y\s+haga?\s+el?\s+commit|\s*y\s+haz\s+commit|\s*haz\s+commit|\s*$)/i,
-  /\bcrea(?:r)?\s+un\s+repositorio\s+(?:llamado|nombrado)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\b(readme)\b[\s\S]*?\b(que\s+diga|con\s+contenido)\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+y\s+commit|\s*$)/i,
-  // en
   /\bcreate\s+(?:a\s+)?repo(?:sitory)?\s+(?:named|called)\s+([a-z0-9._\-\/]+)\b[\s\S]*?\badd\s+(?:a\s+)?readme\b[\s\S]*?\bsay(?:s)?\s+["'“”]?([\s\S]+?)["'“”]?(?:\s+and\s+commit|\s*$)/i,
 ];
-
 function detectGitBootstrap(text) {
   const t = String(text || '');
   for (const re of GIT_BOOTSTRAP_PATTERNS) {
     const m = t.match(re);
     if (m) {
-      // Heurística: algunos patrones capturan 2 o 4 grupos; normalizar.
       const name = (m[1] || '').trim().replace(/^\.\/+/, '').replace(/^\/+/, '');
-      const readme = (m[2] && !m[3]) ? m[2] : (m[4] || '');
-      const readmeText = String(readme || '').trim();
-      if (name && readmeText) {
-        return { repoName: name, readmeText: readmeText };
-      }
+      const readmeText = String(m[2] || '').trim();
+      if (name && readmeText) return { repoName: name, readmeText };
     }
   }
   return null;
 }
 
-/**
- * Resuelve un tool por nombre candidato (permite variaciones entre servidores).
- * Devuelve la primera coincidencia presente en listTools(server).
- * Ejemplo: pickTool('git', ['git_add','add','stage'])
- */
+const ROOT_README_PATTERNS = [
+  /\bcrea(?:r)?\s+un\s+readme\b[\s\S]*?\b(en\s+el\s+root|en\s+la\s+ra[ií]z|root\s+del\s+repo|root\s+del\s+repositorio)\b[\s\S]*?\b(que\s+diga|con\s+contenido)\s+["'“”]?([\s\S]+?)["'“”]?\s*$/i,
+  /\bcreate\s+(?:a\s+)?readme\b[\s\S]*?\b(in\s+the\s+root|at\s+repo\s+root)\b[\s\S]*?\b(say|with)\s+["'“”]?([\s\S]+?)["'“”]?\s*$/i,
+];
+function detectRootReadme(text) {
+  const t = String(text || '');
+  for (const re of ROOT_README_PATTERNS) {
+    const m = t.match(re);
+    if (m) {
+      const readmeText = String(m[3] || '').trim();
+      if (readmeText) return { readmeText };
+    }
+  }
+  return null;
+}
+
+const FS_ROOTS_PATTERNS = [
+  /\b(cu[aá]les?|que)\s+son\s+mis\s+directorios\s+permitidos\b/i,
+  /\bwhat\s+are\s+my\s+(allowed\s+)?directories\b/i,
+];
+function detectFsRootsQuestion(text) {
+  const t = String(text || '');
+  return FS_ROOTS_PATTERNS.some(re => re.test(t));
+}
+function filesystemAllowedRoots() {
+  const args = (process.env.MCP_filesystem_ARGS || '..').trim();
+  const parts = args ? args.split(/\s+/).filter(Boolean) : ['..'];
+  const resolved = parts.map(p => ({ arg: p, abs: path.resolve(process.cwd(), p) }));
+  return { parts, resolved };
+}
+
+// ---------------------- Tools discovery ----------------------
+
 async function pickTool(server, candidates) {
   const tools = await listTools(server).catch(() => []);
   const names = new Set((tools || []).map(t => t?.name).filter(Boolean));
-  for (const c of candidates) {
-    if (names.has(c)) return c;
-  }
+  for (const c of candidates) if (names.has(c)) return c;
   throw new Error(`No matching tool in ${server}: tried [${candidates.join(', ')}]`);
 }
 
-/**
- * Ejecuta la secuencia “bootstrap de módulo” dentro del repo actual:
- * - Crea carpeta <repoName> si no existe (filesystem)
- * - Escribe README.md con el contenido indicado (filesystem)
- * - git add y git commit de los cambios (git)
- * Retorna un arreglo de bloques para incrustar en el prompt (summary+raw).
- */
-async function runGitBootstrapFlow({ repoName, readmeText }) {
-  // Asegura servidores activos
-  await ensureMcp('filesystem');
-  await ensureMcp('git');
+// ---------------------- Robust calls (arg variants) ----------------------
 
-  // Resuelve herramientas disponibles (tolerante a prefijos git_)
-  const mkdirTool   = await pickTool('filesystem', ['create_directory', 'mkdir', 'make_directory']);
-  const writeTool   = await pickTool('filesystem', ['write_file', 'save_file', 'write']);
-  const addTool     = await pickTool('git',        ['git_add', 'add', 'stage']);
-  const commitTool  = await pickTool('git',        ['git_commit', 'commit']);
-
-  // Paths y mensajes
-  const dirPath = repoName; // relativo al root permitido (“..”)
-  const readmePath = `${repoName.replace(/\/+$/,'')}/README.md`;
-  const commitMsg = `chore(${repoName}): add README`;
-
-  const blocks = [];
-
-  // 1) mkdir
-  const mkRes = await runTool('filesystem', mkdirTool, { path: dirPath }).catch(e => ({ error: String(e?.message || e) }));
-  blocks.push(tagBlock('filesystem', mkdirTool, summarizeGeneric('filesystem', mkdirTool, mkRes)));
-
-  // 2) write README.md
-  const wrRes = await runTool('filesystem', writeTool, {
-    path: readmePath,
-    content: String(readmeText),
-  }).catch(e => ({ error: String(e?.message || e) }));
-  blocks.push(tagBlock('filesystem', writeTool, summarizeGeneric('filesystem', writeTool, wrRes)));
-
-  // 3) git add (prueba esquemas comunes)
-  const addRes = await tryGitAdd(addTool, readmePath);
-  blocks.push(tagBlock('git', addTool, summarizeGeneric('git', addTool, addRes)));
-
-  // 4) git commit
-  const cmRes = await runTool('git', commitTool, { message: commitMsg }).catch(e => ({ error: String(e?.message || e) }));
-  blocks.push(tagBlock('git', commitTool, summarizeGeneric('git', commitTool, cmRes)));
-
-  return { blocks, commitMsg };
+async function tryFsWriteFile(tool, filePath, text) {
+  const TRY = [
+    { path: filePath, content: text },
+    { path: filePath, contents: text },
+    { filepath: filePath, content: text },
+    { path: filePath, data: text },
+    { path: filePath, text },
+  ];
+  for (const args of TRY) {
+    try { return await runTool('filesystem', tool, args); } catch {}
+  }
+  throw new Error(`filesystem write failed for ${filePath}`);
 }
 
-/**
- * Intenta distintas variantes de argumentos para “git add”,
- * ya que algunos servidores esperan {files}, otros {paths} o {pathspecs}.
- */
-async function tryGitAdd(addTool, filePath) {
+async function tryFsMkdirp(tool, dirPath) {
+  // intenta variantes comunes de mkdir -p
+  const TRY = [
+    { path: dirPath, parents: true },
+    { path: dirPath, recursive: true },
+    { dir: dirPath, recursive: true },
+    { path: dirPath },
+  ];
+  for (const args of TRY) {
+    try { return await runTool('filesystem', tool, args); } catch {}
+  }
+  // si no hay tool o todas fallan, dejamos que write_file falle con error claro
+  throw new Error(`filesystem mkdir failed for ${dirPath}`);
+}
+
+async function tryGitAdd(tool, filePath) {
   const TRY = [
     { files: [filePath] },
     { paths: [filePath] },
@@ -211,34 +193,99 @@ async function tryGitAdd(addTool, filePath) {
     { pathspec: filePath },
   ];
   for (const args of TRY) {
-    try {
-      const r = await runTool('git', addTool, args);
-      // Si no explota, se asume éxito.
-      return r;
-    } catch { /* intenta próxima variante */ }
+    try { return await runTool('git', tool, args); } catch {}
   }
-  // Último intento: sin args (algunos exponen “add all”)
-  try {
-    return await runTool('git', addTool, {});
-  } catch (e) {
+  try { return await runTool('git', tool, {}); } catch (e) {
     throw new Error(`git add failed for ${filePath}: ${e?.message || e}`);
   }
 }
 
+async function tryGitCommit(tool, message, filePath) {
+  const TRY = [
+    { message },
+    { message, add_all: true },
+    { message, all: true },
+    filePath ? { message, paths: [filePath] } : null,
+  ].filter(Boolean);
+  for (const args of TRY) {
+    try { return await runTool('git', tool, args); } catch {}
+  }
+  throw new Error(`git commit failed: ${message}`);
+}
 
-// Este handler coordina la detección de intenciones (slash y NL), ejecuta MCPs cuando corresponde y forwardea a Anthropic con streaming NDJSON.
+// ---------------------- Flows ----------------------
+
+async function runGitBootstrapFlow({ repoName, readmeText }) {
+  await ensureMcp('filesystem');
+  await ensureMcp('git');
+
+  const writeTool  = await pickTool('filesystem', ['write_file', 'save_file', 'write']);
+  const addTool    = await pickTool('git',        ['git_add', 'add', 'stage']);
+  const commitTool = await pickTool('git',        ['git_commit', 'commit']);
+
+  const repoDir = repoName.replace(/\/+$/, '');
+  const readmePath = `${repoDir}/README.md`;
+  const commitMsg = `chore(${repoName}): add README`;
+
+  const blocks = [];
+
+  // mkdir -p del repo (si existe la tool)
+  try {
+    const mkdirTool = await pickTool('filesystem', ['create_directory', 'mkdir', 'make_directory']);
+    const mkRes = await tryFsMkdirp(mkdirTool, repoDir);
+    blocks.push(tagBlock('filesystem', mkdirTool, summarizeGeneric('filesystem', mkdirTool, mkRes)));
+  } catch (e) {
+    // No es fatal si no existe la tool; lo registramos como nota
+    blocks.push(tagBlock('filesystem', 'mkdir?', summarizeGeneric('filesystem', 'mkdir?', { note: 'skip/unsupported', error: String(e?.message || '') })));
+  }
+
+  const wrRes = await tryFsWriteFile(writeTool, readmePath, String(readmeText)).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('filesystem', writeTool, summarizeGeneric('filesystem', writeTool, wrRes)));
+
+  const addRes = await tryGitAdd(addTool, readmePath).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('git', addTool, summarizeGeneric('git', addTool, addRes)));
+
+  const cmRes = await tryGitCommit(commitTool, commitMsg, readmePath).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('git', commitTool, summarizeGeneric('git', commitTool, cmRes)));
+
+  return { blocks, commitMsg };
+}
+
+async function runRootReadmeFlow({ readmeText }) {
+  await ensureMcp('filesystem');
+  await ensureMcp('git');
+
+  const writeTool  = await pickTool('filesystem', ['write_file', 'save_file', 'write']);
+  const addTool    = await pickTool('git',        ['git_add', 'add', 'stage']);
+  const commitTool = await pickTool('git',        ['git_commit', 'commit']);
+
+  const filePath = 'README.md';
+  const commitMsg = `docs: add README`;
+
+  const blocks = [];
+
+  const wrRes = await tryFsWriteFile(writeTool, filePath, String(readmeText)).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('filesystem', writeTool, summarizeGeneric('filesystem', writeTool, wrRes)));
+
+  const addRes = await tryGitAdd(addTool, filePath).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('git', addTool, summarizeGeneric('git', addTool, addRes)));
+
+  const cmRes = await tryGitCommit(commitTool, commitMsg, filePath).catch(e => ({ error: String(e?.message || e) }));
+  blocks.push(tagBlock('git', commitTool, summarizeGeneric('git', commitTool, cmRes)));
+
+  return { blocks, commitMsg };
+}
+
+// ---------------------- POST handler ----------------------
 
 export async function POST(req) {
-  if (!API_KEY) {
+  if (!API_KEY && !BYPASS_ON_MCP) {
     return NextResponse.json({ error: 'ANTHROPIC_API_KEY is not set' }, { status: 500 });
   }
 
   let body;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-  }
+  try { body = await req.json(); }
+  catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }); }
 
   const messagesIn = normalizeMessages(body);
   if (messagesIn.length === 0) {
@@ -248,10 +295,6 @@ export async function POST(req) {
   const lastUser = [...messagesIn].reverse().find(m => m.role === 'user');
   const userText = lastUser?.content || '';
 
-  // ---- Multi-MCP orchestration ----
-  // 1) /mcp … → ejecución directa del MCP indicado
-  // 2) /audit <url> o intención NL → auditor (Bevstack)
-  // 3) NL git bootstrap (crear carpeta+README+commit en repo actual)
   const mcpBlocks = [];
   const mcpSlash = detectMcpSlash(userText);
 
@@ -259,11 +302,20 @@ export async function POST(req) {
     const { server, tool, args } = mcpSlash;
     try {
       await ensureMcp(server);
-      const result = typeof runTool === 'function'
-        ? await runTool(server, tool, args)
-        : await fallbackRun(server, tool, args);
-      const { summary, raw } = summarizeGeneric(server, tool, result);
-      mcpBlocks.push({ tag: `${server}.${tool}`, summary, raw });
+
+      // tools.list → usar listTools()
+      if (tool === 'tools.list' || tool === 'tools/list' || tool === 'tools' || tool === 'list') {
+        const tools = await listTools(server);
+        const summary = [
+          `Tools in "${server}" (${tools?.length ?? 0}):`,
+          ...(tools || []).map(t => `- ${t?.name}${t?.description ? ' — ' + t.description : ''}`)
+        ].join('\n');
+        mcpBlocks.push({ tag: `${server}.tools_list`, summary, raw: safeJsonString(tools || []) });
+      } else {
+        const result = await runTool(server, tool, args);
+        const { summary, raw } = summarizeGeneric(server, tool, result);
+        mcpBlocks.push({ tag: `${server}.${tool}`, summary, raw });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return NextResponse.json({ error: 'MCP call failed', details: msg, server, tool }, { status: 502 });
@@ -277,9 +329,7 @@ export async function POST(req) {
     if (auditUrl) {
       try {
         await ensureMcp('auditor');
-        const report = await auditSite(auditUrl, {
-          timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000),
-        });
+        const report = await auditSite(auditUrl, { timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000) });
         const { summary, raw } = summarizeAudit('auditor', 'audit_site', report, auditUrl);
         mcpBlocks.push({ tag: 'auditor.audit_site', summary, raw });
       } catch (err) {
@@ -287,27 +337,46 @@ export async function POST(req) {
         return NextResponse.json({ error: 'MCP audit failed', details: msg }, { status: 502 });
       }
     } else {
-      // --- Detección NL Git bootstrap ---
       const gitNL = detectGitBootstrap(userText);
       if (gitNL) {
         try {
           const { blocks, commitMsg } = await runGitBootstrapFlow(gitNL);
           mcpBlocks.push(...blocks);
-          // Agrega un bloque sintético de “resumen de acciones”
           const head = `Git/FS bootstrap sequence:\n- dir: ${gitNL.repoName}\n- file: ${gitNL.repoName}/README.md\n- commit: ${commitMsg}`;
           mcpBlocks.push({ tag: 'plan.git_bootstrap', summary: head, raw: safeJsonString({ ...gitNL, commitMsg }) });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return NextResponse.json({ error: 'Git bootstrap failed', details: msg }, { status: 502 });
         }
+      } else {
+        const rootReadme = detectRootReadme(userText);
+        if (rootReadme) {
+          try {
+            const { blocks, commitMsg } = await runRootReadmeFlow(rootReadme);
+            mcpBlocks.push(...blocks);
+            const head = `Root README flow:\n- file: README.md\n- commit: ${commitMsg}`;
+            mcpBlocks.push({ tag: 'plan.root_readme', summary: head, raw: safeJsonString({ ...rootReadme, commitMsg }) });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return NextResponse.json({ error: 'Root README flow failed', details: msg }, { status: 502 });
+          }
+        } else if (detectFsRootsQuestion(userText)) {
+          const roots = filesystemAllowedRoots();
+          const summary = [
+            'Filesystem allowed directories (based on MCP_filesystem_ARGS):',
+            ...roots.resolved.map(r => `- ${r.arg} → ${r.abs}`),
+          ].join('\n');
+          mcpBlocks.push({ tag: 'filesystem.roots', summary, raw: safeJsonString(roots) });
+        }
       }
     }
   }
 
-  // Incrusta los bloques MCP (si existen) en el último mensaje del usuario
-  const augmentedUserContent = embedMcpBlocks(userText, mcpBlocks);
+  if (mcpBlocks.length > 0 && BYPASS_ON_MCP) {
+    return localNdjsonFromBlocks(mcpBlocks);
+  }
 
-  // Construye payload de Anthropic (permite overrides por request)
+  const augmentedUserContent = embedMcpBlocks(userText, mcpBlocks);
   const outMessages = buildOutgoingMessages(messagesIn, augmentedUserContent, mcpBlocks.length > 0);
   const payload = {
     model: (typeof body?.model === 'string' && body.model) ? body.model : MODEL,
@@ -318,7 +387,6 @@ export async function POST(req) {
     stream: STREAMING,
   };
 
-  // Llama a Anthropic (stream NDJSON)
   try {
     const res = await fetch(API_URL, {
       method: 'POST',
@@ -326,27 +394,26 @@ export async function POST(req) {
       body: JSON.stringify(payload),
     });
 
-    // === NO STREAMING ===
+    // === Non-stream ===
     if (!STREAMING) {
       if (!res.ok) {
+        if (mcpBlocks.length > 0 && FALLBACK_ON_ERR) {
+          return localNdjsonFromBlocks(mcpBlocks, `Upstream unavailable (${res.status}). Returning local MCP summary.\n\n`);
+        }
         const errTxt = await safeText(res);
-        return NextResponse.json(
-          { error: `Anthropic error: ${res.status}`, details: safeJson(errTxt) ?? errTxt },
-          { status: 502 }
-        );
+        return NextResponse.json({ error: `Anthropic error: ${res.status}`, details: safeJson(errTxt) ?? errTxt }, { status: 502 });
       }
-      // DEVOLVER JSON CRUDO DE ANTHROPIC para que useChat() pueda leer content[].
       const json = await res.json();
       return NextResponse.json(json);
     }
 
-    // === STREAMING (NDJSON) ===
+    // === Streaming NDJSON ===
     if (!res.ok || !res.body) {
+      if (mcpBlocks.length > 0 && FALLBACK_ON_ERR) {
+        return localNdjsonFromBlocks(mcpBlocks, `Upstream unavailable (${res.status}). Returning local MCP summary.\n\n`);
+      }
       const errTxt = await safeText(res);
-      return NextResponse.json(
-        { error: `Anthropic error: ${res.status}`, details: safeJson(errTxt) ?? errTxt },
-        { status: 502 }
-      );
+      return NextResponse.json({ error: `Anthropic error: ${res.status}`, details: safeJson(errTxt) ?? errTxt }, { status: 502 });
     }
 
     const stream = new ReadableStream({
@@ -355,24 +422,20 @@ export async function POST(req) {
         const dec = new TextDecoder();
         let buffer = '';
         const reader = res.body.getReader();
-
         (async function pump() {
           try {
             while (true) {
               const { value, done } = await reader.read();
               if (done) break;
               buffer += dec.decode(value, { stream: true });
-
               let idx;
               while ((idx = buffer.indexOf('\n')) >= 0) {
                 const line = buffer.slice(0, idx).trimEnd();
                 buffer = buffer.slice(idx + 1);
                 if (!line) continue;
                 if (!line.startsWith('data:')) continue;
-
                 const data = line.slice(5).trim();
                 if (!data || data === '[DONE]') continue;
-
                 try {
                   const evt = JSON.parse(data);
                   if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
@@ -384,15 +447,13 @@ export async function POST(req) {
                   } else if (evt.type === 'error') {
                     controller.enqueue(enc.encode(JSON.stringify({ type: 'error', error: evt.error?.message || 'upstream error' }) + '\n'));
                   }
-                } catch {
-                  // línea malformada, se ignora
-                }
+                } catch {}
               }
             }
           } catch (err) {
-            controller.enqueue(enc.encode(JSON.stringify({ type: 'error', error: String(err?.message || err) }) + '\n'));
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'error', error: String(err?.message || err) }) + '\n'));
           } finally {
-            controller.enqueue(enc.encode(JSON.stringify({ type: 'done' }) + '\n'));
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'done' }) + '\n'));
             controller.close();
           }
         })();
@@ -400,19 +461,18 @@ export async function POST(req) {
     });
 
     return new Response(stream, {
-      headers: {
-        'content-type': 'application/x-ndjson; charset=utf-8',
-        'cache-control': 'no-store',
-      },
+      headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' },
     });
   } catch (err) {
+    if (mcpBlocks.length > 0 && FALLBACK_ON_ERR) {
+      return localNdjsonFromBlocks(mcpBlocks, `Upstream request failed. Returning local MCP summary.\n\n`);
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: 'Upstream request failed', details: msg }, { status: 502 });
   }
 }
 
-
-// Este bloque encapsula headers y parsers varios. Se mantiene sin dependencias.
+// ---------------------- Anthropic helpers ----------------------
 
 function anthropicHeaders() {
   return {
@@ -421,71 +481,36 @@ function anthropicHeaders() {
     'anthropic-version': '2023-06-01',
   };
 }
+async function safeText(res) { try { return await res.text(); } catch { return ''; } }
+function safeJson(txt) { try { return JSON.parse(txt); } catch { return null; } }
+function safeJsonString(obj) { try { return JSON.stringify(obj, null, 2); } catch { return '{}'; } }
 
-function extractText(json) {
-  try {
-    const parts = json?.content || [];
-    return parts
-      .filter(p => p?.type === 'text' && typeof p.text === 'string')
-      .map(p => p.text)
-      .join('') || '';
-  } catch {
-    return '';
-  }
-}
-
-async function safeText(res) {
-  try { return await res.text(); } catch { return ''; }
-}
-function safeJson(txt) {
-  try { return JSON.parse(txt); } catch { return null; }
-}
-function safeJsonString(obj) {
-  try { return JSON.stringify(obj, null, 2); } catch { return '{}'; }
-}
-
-
-// Este bloque inserta los resultados MCP en el último mensaje del usuario para que el modelo tenga “evidencia” autocontenida y verificable.
+// ---------------------- Prompt building ----------------------
 
 function buildOutgoingMessages(original, augmentedUserText, hadMcpBlocks) {
   if (!hadMcpBlocks) return original;
   const out = [...original];
   for (let i = out.length - 1; i >= 0; i--) {
-    if (out[i].role === 'user') {
-      out[i] = { role: 'user', content: augmentedUserText };
-      break;
-    }
+    if (out[i].role === 'user') { out[i] = { role: 'user', content: augmentedUserText }; break; }
   }
   return out;
 }
-
 function embedMcpBlocks(userText, blocks = []) {
   if (!blocks.length) return userText;
-
   const MAX_JSON_CHARS = 70_000;
   const parts = [userText, ''];
-
   for (const b of blocks) {
     const rawJson = b.raw.length > MAX_JSON_CHARS ? b.raw.slice(0, MAX_JSON_CHARS) + '\n/* truncated */' : b.raw;
     parts.push(
-      `MCP_${b.tag} (summary):`,
-      '```text',
-      b.summary,
-      '```',
-      '',
-      `MCP_${b.tag}_JSON (verbatim):`,
-      '```json',
-      rawJson,
-      '```',
-      ''
+      `MCP_${b.tag} (summary):`, '```text', b.summary, '```', '',
+      `MCP_${b.tag}_JSON (verbatim):`, '```json', rawJson, '```', ''
     );
   }
-
   parts.push('Please analyze the MCP results above: explain findings, risks, and propose clear, actionable fixes (bulleted). Keep it concise and friendly.');
   return parts.join('\n');
 }
 
-// Este bloque produce resúmenes compactos de resultados para incrustar en el prompt de salida.
+// ---------------------- Summaries & local stream ----------------------
 
 function summarizeAudit(server, tool, report, url) {
   const pct = formatScore(report?.overallScore);
@@ -495,19 +520,11 @@ function summarizeAudit(server, tool, report, url) {
     const sim = p?.similarity != null ? `${p.similarity}` : '—';
     const miss = (p?.sectionsMissing || []).length;
     const at = p?.foundAt ? ` → ${p.foundAt}` : p?.error ? ` → ${p.error}` : '';
-    const missingList =
-      miss > 0
-        ? `; missing: ${p.sectionsMissing.slice(0, 6).join(', ')}${miss > 6 ? '…' : ''}`
-        : '';
+    const missingList = miss > 0 ? `; missing: ${p.sectionsMissing.slice(0, 6).join(', ')}${miss > 6 ? '…' : ''}` : '';
     return `- ${cap(p?.type || 'page')}: ${p?.pass ? 'PASS' : 'FAIL'} (sim ${sim}, miss ${miss})${at}${missingList}`;
   });
-
-  return {
-    summary: [head, ...lines].join('\n'),
-    raw: safeJsonString(report),
-  };
+  return { summary: [head, ...lines].join('\n'), raw: safeJsonString(report) };
 }
-
 function summarizeGeneric(server, tool, result) {
   const json = safeJsonString(result);
   let keys = [];
@@ -515,28 +532,25 @@ function summarizeGeneric(server, tool, result) {
   const head = `Result from ${server}.${tool}: ${keys.length ? 'keys=' + keys.join(', ') : 'no keys'}.`;
   return { summary: head, raw: json };
 }
-
-// Utilidades generales de formato y helpers para MCP.
-
 function formatScore(s) {
-  if (typeof s === 'number') {
-    const pct = s > 1 ? s : s * 100;
-    return `${Math.round(pct)}%`;
-  }
+  if (typeof s === 'number') { const pct = s > 1 ? s : s * 100; return `${Math.round(pct)}%`; }
   return '—';
 }
-function cap(x) {
-  const s = String(x || '');
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
+function cap(x) { const s = String(x || ''); return s.charAt(0, 0).toUpperCase() + s.slice(1); }
+// (fix menor: cap usaba charAt(0).toUpperCase())
+function tagBlock(server, tool, { summary, raw }) { return { tag: `${server}.${tool}`, summary, raw }; }
 
-function tagBlock(server, tool, { summary, raw }) {
-  return { tag: `${server}.${tool}`, summary, raw };
-}
-
-async function fallbackRun(server, tool, args) {
-  if (server === 'auditor' && tool === 'audit_site' && args?.url) {
-    return auditSite(args.url, { timeoutMs: Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000) });
-  }
-  throw new Error('runTool not available in facade; please add it for multi-MCP.');
+function localNdjsonFromBlocks(blocks, prefix = '') {
+  const text = prefix + blocks.map(b => b.summary).join('\n\n');
+  const enc = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(enc.encode(JSON.stringify({ type: 'delta', text }) + '\n'));
+      controller.enqueue(enc.encode(JSON.stringify({ type: 'done' }) + '\n'));
+      controller.close();
+    }
+  });
+  return new Response(stream, {
+    headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' },
+  });
 }
