@@ -1,10 +1,9 @@
-// src/lib/net/findCandidateLink.js
 import { load } from 'cheerio';
 
 /**
  * @typedef {Object} FindOpts
  * @property {boolean} [sameHostOnly=false]
- * @property {string}  [requireKeyword]  // ← NUEVO: exige que la URL contenga esta palabra (lowercased)
+ * @property {string}  [requireKeyword]  
  */
 
 export function findCandidateLink(homeHtml, origin, tails, opts = {}) {
@@ -15,7 +14,7 @@ export function findCandidateLink(homeHtml, origin, tails, opts = {}) {
 
   const $ = load(homeHtml, { decodeEntities: true });
   const wantSameHost = !!opts.sameHostOnly;
-  const must = (opts.requireKeyword || '').toLowerCase(); // ← NUEVO
+  const must = (opts.requireKeyword || '').toLowerCase(); 
 
   const resolveHref = (href) => {
     if (!href || typeof href !== 'string') return null;
@@ -44,7 +43,6 @@ export function findCandidateLink(homeHtml, origin, tails, opts = {}) {
 
     const low = abs.toLowerCase();
 
-    // ← NUEVO: si se pidió requireKeyword, la URL debe contenerla
     if (must && !low.includes(must)) continue;
 
     if (matchesTails(low)) return abs;

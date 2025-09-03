@@ -1,8 +1,3 @@
-// src/tools/get_required_sections.js
-// Tool MCP: get_required_sections
-// Input:  { type: "privacy"|"terms"|"faq" }
-// Output: { sections: string[] }
-
 import { getRequiredSections } from '../lib/audit/requiredSections.js';
 import { loadEnvConfig } from '../config/env.js';
 

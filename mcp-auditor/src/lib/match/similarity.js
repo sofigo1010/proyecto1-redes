@@ -1,7 +1,3 @@
-// src/lib/match/similarity.js
-// TF-IDF + coseno con normalización L2.
-// Nota: devolvemos similitud en 0–100 (porcentaje), igual que tu API.
-
 import { tokenize, termFreq, termSet, buildVocab, calcDocFreq } from './tokenize.js';
 
 /**
@@ -21,7 +17,7 @@ export function idfOf(N, df) {
 export function buildWorkspace(docsTokens) {
   const docSets = docsTokens.map(termSet);
   const df = calcDocFreq(docSets);
-  const vocab = buildVocab(df); // ordenado y estable
+  const vocab = buildVocab(df);
   const N = docsTokens.length;
 
   const idf = new Map();

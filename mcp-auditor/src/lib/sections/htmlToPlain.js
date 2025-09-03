@@ -1,4 +1,3 @@
-// src/lib/sections/htmlToPlain.js
 // Convierte HTML a texto plano eliminando scripts/estilos y normalizando espacios.
 
 import { load } from 'cheerio';

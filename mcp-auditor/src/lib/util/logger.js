@@ -1,4 +1,3 @@
-// src/lib/util/logger.js
 // Logger simple: niveles, prefijos y redaction de claves sensibles.
 // Escribe SIEMPRE a STDERR para no contaminar STDOUT (canal MCP).
 

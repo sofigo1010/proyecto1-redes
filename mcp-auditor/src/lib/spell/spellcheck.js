@@ -1,4 +1,3 @@
-// src/lib/spell/spellcheck.js
 // Revisión ortográfica con nspell (EN) + whitelist. Tolerante a fallos.
 // - Carga diccionario desde assets/dictionaries/{en_US.aff,en_US.dic}.
 // - Si el diccionario no existe, continúa "silenciosamente" (sin typos).
@@ -40,7 +39,7 @@ export async function getSpell(opts = {}) {
     SPELL_CACHE.set(cacheKey, sp);
     return sp;
   } catch {
-    // Si no hay diccionarios, devolvemos un "spell" nulo
+    // Si no hay diccionarios, devuelve un "spell" nulo
     const nullSpell = {
       correct: () => true,
       add: () => {},
@@ -75,7 +74,7 @@ export async function spellcheckTokens(tokens, opts = {}) {
   if (!enable || !Array.isArray(tokens) || tokens.length === 0) return [];
 
   const spell = await getSpell({ dict: opts.dict || 'en_US', whitelist: opts.whitelist || [] });
-  if (spell.__disabled) return []; // sin dics => no marcamos typos
+  if (spell.__disabled) return []; // sin dics => no marca typos
 
   const minLen = Math.max(2, opts.minLen ?? 3);
   const seen = new Set();
@@ -94,7 +93,7 @@ export async function spellcheckTokens(tokens, opts = {}) {
         out.push(w);
       }
     } catch {
-      // Si nspell explota con algún término raro, lo ignoramos
+      // Si nspell explota con algún término raro, lo ignora
       continue;
     }
   }

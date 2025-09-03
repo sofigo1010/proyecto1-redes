@@ -1,4 +1,3 @@
-// src/lib/match/tokenize.js
 // Tokenizador minimalista para TF-IDF:
 //  - Divide por cualquier carácter NO [a-z0-9] (case-insensitive).
 //  - Filtra vacíos.
@@ -18,7 +17,6 @@ export function tokenize(text, opts = {}) {
   const minLen = Math.max(0, opts.minLen ?? DEFAULT_MIN_LEN);
 
   // Split por no-alfaNum (idéntico en espíritu a /[^a-z0-9]+/gi).
-  // Nota: mantenemos simple para reproducibilidad con tu API.
   const parts = text.split(/[^a-z0-9]+/gi);
 
   /** @type {string[]} */

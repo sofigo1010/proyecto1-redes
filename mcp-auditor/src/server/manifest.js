@@ -1,4 +1,3 @@
-// src/server/manifest.js
 // Carga y valida el manifest MCP, aplica defaults y sanity checks.
 
 import fs from 'node:fs/promises';

@@ -1,4 +1,3 @@
-// src/lib/audit/thresholds.js
 // Reglas de umbrales y pase por tipo (privacy, terms, faq).
 // Lee defaults/overrides desde env.js y ofrece helpers puros.
 //

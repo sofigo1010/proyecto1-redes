@@ -1,4 +1,3 @@
-// src/lib/audit/scorer.js
 // Scoring por página (privacy/terms/faq):
 //  - HTML -> texto plano (htmlToPlain) + headings (extractHeadings)
 //  - Similaridad 0–100 vs templates PDF (PP/TOS/CS) con TF-IDF/coseno
@@ -10,9 +9,6 @@
 //  - pickTemplatesFor(type) -> string[]
 //  - scorePlain(type, text, cfg) -> métricas sin headings
 //  - scoreHtml(type, html, cfg)  -> métricas + headings
-//
-// NOTA: Este módulo NO hace fetch de red ni descubre URLs;
-//       lo hará la tool `audit_site`. Aquí sólo se evalúa contenido.
 
 import { htmlToPlain } from '../sections/htmlToPlain.js';
 import { extractHeadings } from '../sections/extractHeadings.js';

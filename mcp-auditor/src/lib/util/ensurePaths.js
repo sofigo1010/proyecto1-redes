@@ -1,4 +1,3 @@
-// src/lib/util/ensurePaths.js
 // Utilidades de rutas/archivos para acceder a assets del paquete (PDFs, diccionarios).
 // Garantiza:
 //  - Resolución desde la raíz del paquete (no desde CWD del integrador).

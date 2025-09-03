@@ -1,35 +1,3 @@
-// src/tools/audit_site.js
-// Tool MCP: audit_site
-// Input:  { url: string }
-// Output: {
-//   overallPass: boolean,
-//   overallScore: number (0–1) ó 0–100 según tu consumidor; aquí 0–1 para API MCP,
-//   pages: [{
-//     type: 'privacy'|'terms'|'faq',
-//     foundAt?: string,
-//     pass: boolean,
-//     similarity: number,     // 0–100
-//     sectionsFound?: string[],
-//     sectionsMissing?: string[],
-//     typos?: string[],
-//     typoRate?: number,      // 0–1
-//     headings?: string[],
-//     qaCount?: number,       // sólo faq
-//     rawTextLength?: number,
-//     notes?: string[],
-//     error?: string
-//   }]
-// }
-//
-// Nota: Mantiene la lógica 1:1 con el diseño del endpoint previo:
-//  - Descubre candidatos por tails + <a href> en el home.
-//  - Hace fetch con timeout/UA/limit.
-//  - Scoring por tipo: TF-IDF/coseno vs templates (PDF), secciones y spellcheck.
-//  - Umbrales por tipo (PP/TOS duros, FAQ suave).
-//
-// Importante: devolvemos overallScore en 0–1 (normalizado). Si quieres 0–100,
-// simplemente multiplica por 100 en el consumidor.
-
 import { loadEnvConfig } from '../config/env.js';
 import { fetchHtml } from '../lib/net/fetchWithTimeout.js';
 import { resolveCandidates } from '../lib/net/resolveCandidates.js';
@@ -86,7 +54,6 @@ export default async function auditSiteTool(args, { log }) {
   const env = loadEnvConfig();
 
   // ---- Tails por tipo (Shopify-friendly) + ENV overrides ----
-  // Evitamos tails genéricos como "policy/policies" que llevan a shipping/refund.
   const TAILS = {
     privacy: getTails('PRIVACY', [
       'policies/privacy-policy',   // Shopify
@@ -123,7 +90,7 @@ export default async function auditSiteTool(args, { log }) {
     };
   }
 
-  // 2) Descargar el home (podría fallar y seguimos con tails directos)
+  // 2) Descargar el home
   let homeHtml = '';
   try {
     const { text } = await fetchHtml(url, {
@@ -137,8 +104,6 @@ export default async function auditSiteTool(args, { log }) {
     log?.('warn', 'audit_site: fetch home failed:', err?.message || err);
   }
 
-  // 3) Resolver candidatos por tipo (mismo host por defecto)
-  //    Usamos TAILS locales (Shopify-friendly) para evitar falsos positivos.
   const byType = resolveCandidates(
     origin,
     homeHtml,
@@ -181,7 +146,6 @@ export default async function auditSiteTool(args, { log }) {
 
   const overallPass = !!(privacyPass && termsPass);
 
-  // Normalizamos overallScore en 0–1 para MCP; si prefieres 0–100, ajusta aquí.
   const overallScore = clamp01(overallScorePct / 100);
 
   return {
@@ -192,8 +156,6 @@ export default async function auditSiteTool(args, { log }) {
 }
 
 /**
- * Audita un tipo con su lista de candidatos. Intenta del primero al último,
- * guardando el mejor por similarity (aunque el primero que pase umbral corta temprano).
  * @param {'privacy'|'terms'|'faq'} type
  * @param {string[]} candidates
  * @param {*} env
@@ -206,13 +168,13 @@ async function auditOneType(type, candidates, env, log) {
   let best = /** @type {ReturnType<typeof makeEmptyPage>} */ (makeEmptyPage(type));
   best.error = candidates?.length ? 'No candidate passed threshold' : 'No candidates found';
 
-  // Intentamos cada candidato en orden
+  // Intenta cada candidato en orden
   for (const href of candidates || []) {
     let html = '';
     try {
       const { text } = await fetchHtml(href, {
         timeoutMs: env.TIMEOUT_MS,
-        userAgent: env.userAgent ?? env.USER_AGENT, // por si tu env usa minúsculas
+        userAgent: env.userAgent ?? env.USER_AGENT, 
         maxBytes: env.MAX_HTML_SIZE_BYTES,
         retries: env.FETCH_RETRIES ?? 2,
       });
@@ -260,7 +222,7 @@ async function auditOneType(type, candidates, env, log) {
     }
   }
 
-  // Si ninguno pasó, devolvemos el mejor intento (o vacío)
+  // Si ninguno pasó, devuelve el mejor intento (o vacío)
   return best;
 }
 

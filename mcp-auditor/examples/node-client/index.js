@@ -12,7 +12,6 @@ const __dirname = path.dirname(__filename);
 
 // --- Config: cómo lanzar el server MCP ---
 const BIN_LOCAL = path.resolve(__dirname, '../../bin/mcp-auditor.js');
-// Si prefieres el bin instalado globalmente, exporta MCP_SERVER_CMD="mcp-auditor"
 const SERVER_CMD = process.env.MCP_SERVER_CMD || process.execPath;
 const SERVER_ARGS = process.env.MCP_SERVER_CMD
   ? []
@@ -46,7 +45,7 @@ function send(method, params) {
   child.stdin.write(JSON.stringify(msg) + '\n');
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    // timeout de cortesía
+    // timeout 
     setTimeout(() => {
       if (pending.has(id)) {
         pending.delete(id);

@@ -1,4 +1,3 @@
-// src/lib/net/resolveCandidates.js
 // Dada la URL base (origin) y el HTML del home, sugiere candidatos por tipo:
 //  - Usa findCandidateLink() para hallar el primer enlace en el home que matchee algún tail.
 //  - Siempre agrega como fallback los tails directos resueltos contra el origin.

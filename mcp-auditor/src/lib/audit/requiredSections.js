@@ -1,4 +1,3 @@
-// src/lib/audit/requiredSections.js
 // Gestión de "secciones requeridas" por tipo de página y ayuda para validarlas.
 //
 // Exporta:
@@ -7,8 +6,7 @@
 //  - normalizeTextForMatch(s): string
 //  - findSectionsInText(plainText, sections): { found:string[], missing:string[] }
 //
-// La detección es simple y robusta a mayúsculas/espacios. Si quieres reglas
-// más estrictas (p. ej., regex con límites de palabra), puedes afinarlas aquí.
+// La detección es simple y robusta a mayúsculas/espacios
 
 import { loadEnvConfig } from '../../config/env.js';
 
@@ -43,7 +41,7 @@ export function getRequiredSections(type, cfg) {
   const env = cfg || loadEnvConfig();
   const map = env.REQUIRED_SECTIONS || {};
   const raw = Array.isArray(map[type]) ? map[type] : [];
-  // Normalizamos para garantizar comparaciones coherentes
+  // Normaliza para garantizar comparaciones coherentes
   return raw.map(normalizeSectionName).filter(Boolean);
 }
 
@@ -51,7 +49,7 @@ export function getRequiredSections(type, cfg) {
  * Detecta qué secciones están presentes en el texto.
  * Coincidencia simple por substring (normalizado).
  * @param {string} plainText  Texto ya convertido a plano (HTML->texto)
- * @param {string[]} sections Lista de nombres de sección (ya normalizados, opcional)
+ * @param {string[]} sections Lista de nombres de sección 
  * @returns {{ found:string[], missing:string[] }}
  */
 export function findSectionsInText(plainText, sections) {
@@ -63,9 +61,6 @@ export function findSectionsInText(plainText, sections) {
 
   for (const q of list) {
     if (!q) continue;
-    // Búsqueda directa; si quieres bordes de palabra, reemplaza por regex:
-    // const re = new RegExp(`\\b${escapeRegex(q)}\\b`, 'i');
-    // const hit = re.test(text);
     const hit = text.includes(q);
     if (hit) found.push(q);
     else missing.push(q);
@@ -74,7 +69,6 @@ export function findSectionsInText(plainText, sections) {
   return { found, missing };
 }
 
-// Utilidad por si más adelante cambiamos a regex con \b
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

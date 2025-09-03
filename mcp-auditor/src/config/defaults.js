@@ -1,6 +1,3 @@
-// src/config/defaults.js
-// Defaults 1:1 con tu API actual.
-
 export const DEFAULTS = Object.freeze({
   // Networking
   TIMEOUT_MS: 12_000,

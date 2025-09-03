@@ -1,4 +1,3 @@
-// src/lib/match/templateMatcher.js
 // Carga templates PDF, extrae texto, cachea por mtime/size y calcula similitud 0–100.
 //
 // Expuestos:

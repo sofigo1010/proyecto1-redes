@@ -1,4 +1,3 @@
-// src/lib/sections/extractHeadings.js
 // Extrae encabezados H1–H3 del HTML y los normaliza para reporte/auditoría.
 //
 // Reglas por defecto (alineadas a uso típico de auditoría):
@@ -34,7 +33,6 @@ export function extractHeadings(html, opts = {}) {
   const maxItems = clampInt(opts.maxItems ?? 200, 1, 10_000);
   const includeTitle = opts.includeTitle ?? true;
 
-  // ✅ usar la función importada "load" (no "cheerio.load")
   const $ = load(html, { decodeEntities: true, lowerCaseTags: true });
 
   /** @type {string[]} */

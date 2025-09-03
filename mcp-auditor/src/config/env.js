@@ -1,6 +1,3 @@
-// src/config/env.js
-// Carga variables de entorno y aplica overrides sobre DEFAULTS.
-
 import { DEFAULTS } from './defaults.js';
 
 function numEnv(name, { min = -Infinity, max = Infinity } = {}) {

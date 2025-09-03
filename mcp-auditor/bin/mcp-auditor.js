@@ -23,7 +23,7 @@ process.on('unhandledRejection', (err) => {
 
 process.on('uncaughtException', (err) => {
   log('error', 'uncaughtException:', err?.stack || err);
-  // No salimos de inmediato para permitir teardown ordenado.
+  // No sale de inmediato para permitir teardown ordenado.
 });
 
 async function main() {

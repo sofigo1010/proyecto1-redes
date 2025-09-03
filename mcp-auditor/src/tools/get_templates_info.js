@@ -1,7 +1,3 @@
-// src/tools/get_templates_info.js
-// Tool MCP: get_templates_info
-// Devuelve { templates: [{ name, path, size }] }
-
 import { getTemplatesInfo } from '../lib/match/templateMatcher.js';
 
 export default async function getTemplatesInfoTool(_args, { log }) {

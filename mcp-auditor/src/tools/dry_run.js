@@ -1,4 +1,3 @@
-// src/tools/dry_run.js
 // Tool MCP: dry_run
 // Descubre candidatos (links) y headings del home SIN calcular similitud ni spellcheck.
 // Input:  { url: string }
@@ -39,7 +38,6 @@ export default async function dryRunTool(args, { log }) {
     homeHtml = text || '';
   } catch (err) {
     log?.('warn', 'dry_run: fetch home failed:', err?.message || err);
-    // Continuamos: sin HTML del home aún podemos proponer tails directos.
   }
 
   // 1) Candidatos por tipo (same host por defecto)

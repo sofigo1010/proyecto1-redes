@@ -1,4 +1,3 @@
-// src/server/stdioTransport.js
 // Transporte JSON-RPC 2.0 sobre stdio con framing dual:
 //  - NDJSON (una línea por mensaje JSON)
 //  - LSP-style: "Content-Length: <n>\r\n\r\n<json>"
@@ -61,7 +60,7 @@ export function attachToStdio(server, opts = {}) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       log('debug', '[rx NDJSON line]', trimmed.slice(0, 200));
-      handleOneLine(trimmed); // encolamos la Promise internamente
+      handleOneLine(trimmed); 
     }
   }
   function handleOneLine(line) {
@@ -77,10 +76,10 @@ export function attachToStdio(server, opts = {}) {
     }
   }
 
-  // --- Parser LSP (Content-Length) ---
+  // Parser LSP 
   let lspBuffer = Buffer.alloc(0);
   function tryDrainLsp() {
-    // Buscamos doble CRLF que separa headers del cuerpo
+    // Busca doble CRLF que separa headers del cuerpo
     while (true) {
       const headerEnd = lspBuffer.indexOf('\r\n\r\n');
       if (headerEnd < 0) return; // headers incompletos
@@ -124,7 +123,7 @@ export function attachToStdio(server, opts = {}) {
         log('debug', '[dispatch] OUT', 'id=', id, 'empty result (ignored)');
       }
     } catch (err) {
-      // Si el server lanzó una excepción no convertida en JSON-RPC, devolvemos error genérico
+      // Si el server lanzó una excepción no convertida en JSON-RPC, devuelve error genérico
       writeMessage({
         jsonrpc: '2.0',
         id,
@@ -160,14 +159,12 @@ export function attachToStdio(server, opts = {}) {
   }
 
   // --- Wire up STDIN events ---
-  // (No seteamos encoding para poder tratar buffers crudos en LSP)
   process.stdin.on('data', onData);
 
   process.stdin.on('end', async () => {
     try {
       console.error('[info] STDIO closed, shutting down.');
 
-      // 1) Si quedó un mensaje NDJSON sin '\n', procésalo ahora.
       try {
         if (framing === FRAMING.NDJSON) {
           const tail = ndjsonBuffer;
@@ -215,12 +212,10 @@ export function attachToStdio(server, opts = {}) {
     }
   });
 
-  // Devolvemos detach para permitir cierre ordenado
   return function detach() {
     try {
       process.stdin.off('data', onData);
     } catch (_) {}
-    // No cerramos stdout (lo maneja el host); sólo hacemos shutdown del server
     server.shutdown?.().catch(() => {});
   };
 }

@@ -1,4 +1,3 @@
-// src/server/createServer.js
 // Carga el manifest, registra tools y maneja JSON-RPC para MCP.
 
 import fs from 'node:fs/promises';
@@ -36,7 +35,6 @@ export async function createServer({ log = () => {} } = {}) {
   addFormats(ajv); // <- esto elimina el warning y valida "format": "uri"
 
   // 2) Cargar schemas (inline o por archivo)
-  // 2) Cargar schemas (inline o por archivo; acepta objeto en cualquiera de los dos campos)
     async function loadSchemaMaybe(primary, secondary) {
     // helper: convierte valor (obj o path) a objeto esquema
     const toSchema = async (val) => {
@@ -117,8 +115,6 @@ export async function createServer({ log = () => {} } = {}) {
       name: t.name,
       description: t.description,
       input_schema: t.inputSchema || null,
-      // Muchos clientes sólo necesitan input_schema para descubrir;
-      // mantenemos output_schema interno para validación post.
     }));
   }
 
@@ -222,7 +218,6 @@ export async function createServer({ log = () => {} } = {}) {
   return {
     handleRequest,
     shutdown,
-    // Exponemos opcionalmente helpers útiles:
     listTools,
     callTool,
     manifest,

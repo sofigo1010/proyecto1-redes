@@ -1,4 +1,3 @@
-// src/lib/spell/whitelist.js
 // Wrapper para exponer la whitelist desde la config/env.
 // Mantiene compatibilidad con imports que esperen este módulo.
 

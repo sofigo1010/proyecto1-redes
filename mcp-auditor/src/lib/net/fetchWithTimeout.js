@@ -1,4 +1,3 @@
-// src/lib/net/fetchWithTimeout.js
 // Fetch robusto para HTML con:
 //  - Headers realistas (evita bloqueos básicos)
 //  - Timeout con AbortController
@@ -16,7 +15,6 @@ function buildHeaders(userAgent) {
     'User-Agent': userAgent || DEFAULT_UA,
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    // no mandamos Sec-Fetch-* ni cookies: suficiente para Shopify
     'Cache-Control': 'no-cache',
     'Pragma': 'no-cache',
   };
@@ -55,7 +53,7 @@ export async function fetchHtml(url, opts = {}) {
       clearTimeout(timer);
 
       if (!res.ok) {
-        // homogeneizamos el mensaje que espera el caller
+        // homogeneiza el mensaje que espera el caller
         throw new Error(`Upstream responded ${res.status}`);
       }
 
@@ -73,18 +71,18 @@ export async function fetchHtml(url, opts = {}) {
             read += value.byteLength;
             const remaining = maxBytes - (read - value.byteLength);
             if (remaining <= 0) {
-              // ya alcanzamos el límite con el chunk anterior
+              // ya alcanzo el límite con el chunk anterior
               break;
             }
             // corta el chunk si excede
             const slice = remaining < value.byteLength ? value.subarray(0, remaining) : value;
             text += decoder.decode(slice, { stream: true });
-            if (slice.byteLength < value.byteLength) break; // alcanzamos límite
+            if (slice.byteLength < value.byteLength) break; // alcanza límite
           }
         }
         text += decoder.decode(); // flush
       } else {
-        // Fallback (debería casi no ocurrir)
+        // Fallback 
         const t = await res.text();
         text = t.slice(0, maxBytes);
       }
@@ -92,7 +90,7 @@ export async function fetchHtml(url, opts = {}) {
       return { text, status: res.status, finalUrl: res.url || url };
     } catch (err) {
       clearTimeout(timer);
-      // AbortError → timeout
+      // AbortError  timeout
       const msg = String(err?.message || err);
       if (msg.includes('The operation was aborted') || msg.includes('aborted')) {
         throw new Error('Fetch timeout');
